@@ -1,7 +1,5 @@
 """
 prices.py — katalog-prices web service
-Flask app that ingests Croatian store price files into Supabase.
-Supports uploading multiple files at once.
 """
 
 import os
@@ -48,12 +46,7 @@ def upsert(table, records, batch_size=500, conflict=None):
         url = f"{SUPABASE_URL}/rest/v1/{table}"
         if conflict:
             url += f"?on_conflict={conflict}"
-        resp = requests.post(
-            url,
-            headers=db_headers(),
-            json=batch,
-            timeout=30,
-        )
+        resp = requests.post(url, headers=db_headers(), json=batch, timeout=30)
         if resp.status_code not in (200, 201):
             log(f"  ❌ {table} error: {resp.status_code} {resp.text[:200]}")
         else:
@@ -98,12 +91,8 @@ def parse_csv(filepath, store):
     for encoding in ["utf-8", "utf-8-sig", "cp1250", "latin-1"]:
         try:
             df = pd.read_csv(
-                filepath,
-                sep=None,
-                engine="python",
-                encoding=encoding,
-                dtype=str,
-                skipinitialspace=True,
+                filepath, sep=None, engine="python",
+                encoding=encoding, dtype=str, skipinitialspace=True,
             )
             log(f"  Opened with encoding: {encoding} — {len(df)} rows")
             break
@@ -193,7 +182,7 @@ def push_to_supabase(df, store):
             "sale_price":    float(row["sale_price"])    if pd.notna(row.get("sale_price"))    else None,
             "is_on_sale":    bool(row.get("is_on_sale", False)),
         })
-    n1 = upsert("master_products", master)
+    n1 = upsert("master_products", master, conflict="barcode")
     log(f"  ✓ master_products: {n1} rows saved")
     n2 = upsert("store_prices", prices, conflict="barcode,store,price_date")
     log(f"  ✓ store_prices: {n2} rows saved")
