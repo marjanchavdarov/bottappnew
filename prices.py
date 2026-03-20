@@ -111,15 +111,7 @@ def fuzzy_rename(df):
 def parse_csv(filepath, store):
     df = None
     for encoding in ["cp1250", "utf-8", "utf-8-sig", "latin-1"]:
-        try:
-            df = pd.read_csv(
-                filepath,
-                sep=None,
-                engine="python",
-                encoding=encoding,
-                dtype=str,
-                skipinitialspace=True,
-            )
+        ("regular_price",    ["maloprodajna", "mpc (eur)", "mpc(eur)", "mpc eur"]),
             log(f"  Opened with encoding: {encoding} — {len(df)} rows")
             break
         except Exception:
