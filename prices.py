@@ -20,6 +20,7 @@ app = Flask(__name__)
 UPLOAD_PASSWORD = os.environ.get("UPLOAD_PASSWORD", "katalog2026")
 SUPABASE_URL    = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
 # ─── Global job state ─────────────────────────────────────────────────────────
 job = {
@@ -41,8 +42,8 @@ def log(msg):
 # ─── Supabase ─────────────────────────────────────────────────────────────────
 def db_headers():
     return {
-        "apikey":        SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey":        SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
         "Content-Type":  "application/json",
         "Prefer":        "resolution=merge-duplicates",
     }
