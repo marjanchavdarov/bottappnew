@@ -17,9 +17,9 @@ load_dotenv()
 
 app = Flask(__name__)
 
-UPLOAD_PASSWORD = os.environ.get("UPLOAD_PASSWORD", "katalog2026")
-SUPABASE_URL    = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY    = os.environ.get("SUPABASE_KEY", "")
+UPLOAD_PASSWORD      = os.environ.get("UPLOAD_PASSWORD", "katalog2026")
+SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY         = os.environ.get("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
 # ─── Global job state ─────────────────────────────────────────────────────────
@@ -69,12 +69,12 @@ def upsert(table, records, batch_size=500):
 # Each entry: (standard_name, [keywords_to_search_for_in_column_name])
 COLUMN_HINTS = [
     ("name",             ["naziv"]),
-    ("brand",            ["marka"]),
+    ("brand",            ["marka", "brand"]),
     ("quantity",         ["neto", "kolici", "koli"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
-    ("regular_price",    ["maloprodajna", "mpc (eur)", "mpc(eur)", "mpc eur"]),
+    ("regular_price",    ["mpc (eur)", "mpc(eur)", "mpc eur"]),
     ("sale_price",       ["posebnog oblika", "posebno", "akcij", "sale"]),
-    ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
+    ("lowest_30d_price", ["30 dan", "30dan", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
     ("category",         ["kategorij", "category"]),
@@ -114,13 +114,11 @@ def parse_csv(filepath, store):
         try:
             df = pd.read_csv(
                 filepath,
-                sep=None,        # auto-detect , or ;
-                engine="python",
+                sep=";",
                 encoding=encoding,
                 dtype=str,
                 skipinitialspace=True,
-)
-            
+            )
             log(f"  Opened with encoding: {encoding} — {len(df)} rows")
             break
         except Exception:
