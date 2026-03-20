@@ -56,14 +56,14 @@ def upsert(table, records, batch_size=500, conflict=None):
 COLUMN_HINTS = [
     ("name",             ["naziv"]),
     ("brand",            ["marka", "brand"]),
-    ("quantity",         ["neto", "kolici", "koli"]),
+    ("quantity",         ["neto", "kolici", "koli", "grama"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
-    ("regular_price",    ["maloprodajna", "mpc (eur)", "mpc(eur)", "mpc eur"]),
-    ("sale_price",       ["posebnog oblika", "posebno", "akcij", "sale"]),
+    ("regular_price",    ["maloprodajna", "maloprod", "mpc (eur)", "mpc(eur)", "mpc eur", "mpc"]),
+    ("sale_price",       ["posebnog oblika", "posebno", "akcij", "akc", "sale"]),
     ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
-    ("category",         ["kategorij", "category"]),
+    ("category",         ["kategorij", "category", "grupe"]),
 ]
 
 def fuzzy_rename(df):
