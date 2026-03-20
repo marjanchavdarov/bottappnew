@@ -72,7 +72,7 @@ COLUMN_HINTS = [
     ("brand",            ["marka", "brand"]),
     ("quantity",         ["neto", "kolici", "koli"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
-    ("regular_price",    ["mpc (eur)", "mpc(eur)", "mpc eur"]),
+    ("regular_price",    ["maloprodajna", "mpc (eur)", "mpc(eur)", "mpc eur"]),
     ("sale_price",       ["posebnog oblika", "posebno", "akcij", "sale"]),
     ("lowest_30d_price", ["30 dan", "30dan", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
@@ -114,7 +114,8 @@ def parse_csv(filepath, store):
         try:
             df = pd.read_csv(
                 filepath,
-                sep=";",
+                sep=None,
+                engine="python",
                 encoding=encoding,
                 dtype=str,
                 skipinitialspace=True,
