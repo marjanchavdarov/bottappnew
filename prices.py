@@ -364,12 +364,31 @@ def download_konzum():
     )
 
 def download_kaufland():
-    log("🔴 KAUFLAND — fetching index...")
-    download_from_index(
-        store="kaufland",
-        index_url="https://www.kaufland.hr/popis-mpc/",
-        base_url="https://www.kaufland.hr/",
-    )
+    log("🔴 KAUFLAND — fetching file list...")
+    json_url = "https://www.kaufland.hr/akcije-novosti/popis-mpc.assetSearch.id=assetList_1599847924.json"
+    r = requests.get(json_url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    files = r.json()
+
+    # Filter to today's files — date format in filename is DDMMYYYY
+    today_str = date.today().strftime("%d%m%Y")  # e.g. 21032026
+    today_files = [f for f in files if today_str in f["label"]]
+
+    if not today_files:
+        # Try yesterday as fallback
+        yesterday_str = (date.today() - timedelta(days=1)).strftime("%d%m%Y")
+        today_files = [f for f in files if yesterday_str in f["label"]]
+        log(f"  No files for today, using yesterday ({yesterday_str}): {len(today_files)} files")
+    else:
+        log(f"  Found {len(today_files)} files for today")
+
+    job["total"] += len(today_files)
+    csv_urls = ["https://www.kaufland.hr" + f["path"] for f in today_files]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_download_one_csv, url, "kaufland"): url for url in csv_urls}
+        for future in as_completed(futures):
+            future.result()
 
 def download_plodine():
     log("🟣 PLODINE — fetching index...")
