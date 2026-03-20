@@ -68,12 +68,12 @@ def upsert(table, records, batch_size=500):
 # Each entry: (standard_name, [keywords_to_search_for_in_column_name])
 COLUMN_HINTS = [
     ("name",             ["naziv"]),
-    ("brand",            ["marka", "brand"]),
+    ("brand",            ["marka"]),
     ("quantity",         ["neto", "kolici", "koli"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
-    ("regular_price",    ["mpc (eur)", "mpc(eur)", "mpc eur"]),
+    ("regular_price",    ["maloprodajna", "mpc (eur)", "mpc(eur)", "mpc eur"]),
     ("sale_price",       ["posebnog oblika", "posebno", "akcij", "sale"]),
-    ("lowest_30d_price", ["30 dan", "30dan", "najni"]),
+    ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
     ("category",         ["kategorij", "category"]),
@@ -113,10 +113,12 @@ def parse_csv(filepath, store):
         try:
             df = pd.read_csv(
                 filepath,
-                sep=";",
+                sep=None,        # auto-detect , or ;
+                engine="python",
                 encoding=encoding,
                 dtype=str,
                 skipinitialspace=True,
+)
             )
             log(f"  Opened with encoding: {encoding} — {len(df)} rows")
             break
