@@ -249,8 +249,18 @@ def process_zip_bytes(zip_bytes, store, ext="csv"):
 
 def download_lidl():
     log("🔵 LIDL — downloading ZIP...")
-    url = "https://tvrtka.lidl.hr/fileadmin/user_upload/HR_Cjenik.zip"
+    today = date.today()
+    date_str = today.strftime("%d_%m_%Y")  # 20_03_2026
+    url = f"https://tvrtka.lidl.hr/content/download/156615/fileupload/Popis_cijena_po_trgovinama_na_dan_{date_str}.zip"
+    log(f"  URL: {url}")
     r = requests.get(url, headers=HEADERS, timeout=120)
+    if r.status_code == 404:
+        # Try yesterday in case today's file isn't published yet
+        yesterday = today - timedelta(days=1)
+        date_str = yesterday.strftime("%d_%m_%Y")
+        url = f"https://tvrtka.lidl.hr/content/download/156615/fileupload/Popis_cijena_po_trgovinama_na_dan_{date_str}.zip"
+        log(f"  Today not found, trying yesterday: {url}")
+        r = requests.get(url, headers=HEADERS, timeout=120)
     r.raise_for_status()
     log(f"  Downloaded {len(r.content)//1024} KB")
     process_zip_bytes(r.content, "lidl", "csv")
