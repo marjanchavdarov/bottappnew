@@ -41,12 +41,15 @@ def db_headers():
         "Prefer":        "resolution=merge-duplicates",
     }
 
-def upsert(table, records, batch_size=500):
+def upsert(table, records, batch_size=500, conflict=None):
     total = 0
     for i in range(0, len(records), batch_size):
         batch = records[i:i+batch_size]
+        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        if conflict:
+            url += f"?on_conflict={conflict}"
         resp = requests.post(
-            f"{SUPABASE_URL}/rest/v1/{table}",
+            url,
             headers=db_headers(),
             json=batch,
             timeout=30,
@@ -192,7 +195,7 @@ def push_to_supabase(df, store):
         })
     n1 = upsert("master_products", master)
     log(f"  ✓ master_products: {n1} rows saved")
-    n2 = upsert("store_prices", prices)
+    n2 = upsert("store_prices", prices, conflict="barcode,store,price_date")
     log(f"  ✓ store_prices: {n2} rows saved")
     return n1
 
