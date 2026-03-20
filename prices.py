@@ -119,7 +119,7 @@ def parse_csv(filepath, store):
                 dtype=str,
                 skipinitialspace=True,
 )
-            )
+            
             log(f"  Opened with encoding: {encoding} — {len(df)} rows")
             break
         except Exception:
