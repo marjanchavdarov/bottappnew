@@ -356,12 +356,42 @@ def download_spar():
     )
 
 def download_konzum():
-    log("🔴 KONZUM — fetching index...")
-    download_from_index(
-        store="konzum",
-        index_url="https://www.konzum.hr/web/tasks/files/prices/",
-        base_url="https://www.konzum.hr/web/tasks/files/prices/",
-    )
+    log("🔴 KONZUM — fetching file list...")
+    today_str = date.today().strftime("%Y-%m-%d")
+    base = "https://www.konzum.hr"
+    csv_urls = []
+    page = 1
+
+    while True:
+        url = f"{base}/cjenici?date={today_str}&page={page}"
+        log(f"  Page {page}: {url}")
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        if r.status_code != 200:
+            break
+
+        # Find all download links
+        links = re.findall(r'href="(/cjenici/download\?title=[^"]+)"', r.text)
+        if not links:
+            break
+
+        for link in links:
+            full_url = base + link
+            if full_url not in csv_urls:
+                csv_urls.append(full_url)
+
+        # Check if there's a next page
+        if f'page={page+1}' not in r.text:
+            break
+        page += 1
+
+    log(f"  Found {len(csv_urls)} files for today")
+    job["total"] += len(csv_urls)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_download_one_csv, url, "konzum"): url
+                   for url in csv_urls}
+        for future in as_completed(futures):
+            future.result()
 
 def download_kaufland():
     log("🔴 KAUFLAND — fetching file list...")
