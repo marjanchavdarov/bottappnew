@@ -326,7 +326,8 @@ def download_spar():
         raise ValueError(f"Spar JSON empty — files not published yet for {today_str}")
 
     csv_urls = []
-    for item in data:
+    files = data.get("files", data) if isinstance(data, dict) else data
+    for item in files:
         if isinstance(item, dict):
             url = item.get("url") or item.get("URL") or item.get("naziv") or item.get("name") or ""
         else:
