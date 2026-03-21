@@ -348,12 +348,41 @@ def download_from_index(store, index_url, base_url, date_pattern=None):
             log(f"  [{job['processed']}/{len(csv_urls)}] {n} products")
 
 def download_spar():
-    log("🟢 SPAR — fetching index...")
-    download_from_index(
-        store="spar",
-        index_url="https://www.spar.hr/datoteke_cjenici/index.html",
-        base_url="https://www.spar.hr/datoteke_cjenici/",
-    )
+    log("🟢 SPAR — fetching JSON index...")
+    today_str = date.today().strftime("%Y%m%d")  # 20260321
+    json_url = f"https://www.spar.hr/datoteke_cjenici/Cjenik{today_str}.json"
+    log(f"  URL: {json_url}")
+
+    r = requests.get(json_url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+
+    data = r.json()
+    if not data:
+        raise ValueError(f"Spar JSON is empty — files not published yet for {today_str}")
+
+    # JSON contains list of filenames or objects with filename
+    # Extract URLs — handle both [{"naziv": "file.csv", "url": "..."}, ...] 
+    # and plain ["file.csv", ...] formats
+    csv_urls = []
+    for item in data:
+        if isinstance(item, dict):
+            url = item.get("url") or item.get("URL") or item.get("naziv") or item.get("name")
+        else:
+            url = str(item)
+        if url:
+            if not url.startswith("http"):
+                url = f"https://www.spar.hr/datoteke_cjenici/{url}"
+            if url.lower().endswith(".csv"):
+                csv_urls.append(url)
+
+    log(f"  Found {len(csv_urls)} files")
+    job["total"] += len(csv_urls)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_download_one_csv, url, "spar"): url
+                   for url in csv_urls}
+        for future in as_completed(futures):
+            future.result()
 
 def download_konzum():
     log("🔴 KONZUM — fetching file list...")
