@@ -1,7 +1,6 @@
 """
 prices.py — katalog-prices web service
-Full auto-download: fetches price files directly from store websites.
-No manual uploading needed. Trigger daily via UptimeRobot or /daily endpoint.
+Full auto-download for all Croatian grocery stores.
 """
 
 import os
@@ -26,7 +25,7 @@ SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY         = os.environ.get("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; katalog-prices/1.0; +https://botapp-u7qa.onrender.com)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; katalog-prices/1.0)"}
 
 job = {
     "running": False, "status": "idle", "store": "",
@@ -92,11 +91,11 @@ def fuzzy_rename(df):
     df = df.rename(columns=rename_map)
     missing = [h[0] for h in COLUMN_HINTS if h[0] not in already_mapped]
     if missing:
-        log(f"  ⚠️  Missing cols: {missing}")
+        log(f"  ⚠️  Missing: {missing}")
     return df
 
 def location_from_filename(filename):
-    name = os.path.splitext(os.path.basename(filename))[0]
+    name = os.path.splitext(os.path.basename(str(filename)))[0]
     name = re.sub(r'\d{4}[-_]\d{2}[-_]\d{2}.*', '', name)
     name = re.sub(r'\d{8}.*', '', name)
     name = re.sub(r'\d{5,}', '', name)
@@ -107,14 +106,13 @@ def location_from_filename(filename):
 
 # ─── Parse CSV ────────────────────────────────────────────────────────────────
 def parse_csv(src, store, filename=""):
-    # Always work with raw bytes so we can retry encodings cleanly
+    # Always read to raw bytes first so we can retry encodings with fresh BytesIO
     if isinstance(src, (bytes, bytearray)):
         raw = bytes(src)
     elif isinstance(src, io.BytesIO):
         src.seek(0)
         raw = src.read()
     else:
-        # filepath string
         with open(src, "rb") as f:
             raw = f.read()
 
@@ -122,12 +120,9 @@ def parse_csv(src, store, filename=""):
     for encoding in ["utf-8-sig", "utf-8", "utf-16", "utf-16-le", "cp1250", "latin-1"]:
         try:
             df = pd.read_csv(
-                io.BytesIO(raw),   # fresh BytesIO every attempt
-                sep=None,
-                engine="python",
-                encoding=encoding,
-                dtype=str,
-                skipinitialspace=True,
+                io.BytesIO(raw),
+                sep=None, engine="python",
+                encoding=encoding, dtype=str, skipinitialspace=True,
             )
             log(f"  Encoding: {encoding} — {len(df)} rows")
             break
@@ -161,6 +156,7 @@ def parse_csv(src, store, filename=""):
     df["store"]         = store
     df["location"]      = location_from_filename(filename)
     return df
+
 # ─── Parse XML ────────────────────────────────────────────────────────────────
 def parse_xml(src, store, filename=""):
     if isinstance(src, (bytes, bytearray)):
@@ -206,6 +202,25 @@ def parse_xml(src, store, filename=""):
     df["location"]      = location_from_filename(filename)
     return df
 
+# ─── Process ZIP bytes ────────────────────────────────────────────────────────
+def process_zip_bytes(zip_bytes, store, ext="csv"):
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = [n for n in zf.namelist()
+                 if n.lower().endswith(f".{ext}") and not n.startswith("__")]
+        log(f"  ZIP: {len(names)} .{ext} files")
+        job["total"] += len(names)
+        for i, name in enumerate(names):
+            job["current_file"] = os.path.basename(name)
+            try:
+                data = zf.read(name)
+                df = parse_csv(data, store, filename=name) if ext == "csv" else parse_xml(data, store, filename=name)
+                log(f"  [{i+1}/{len(names)}] {os.path.basename(name)} — {len(df)} rows")
+                push_to_supabase(df, store)
+                job["processed"] += 1
+            except Exception as e:
+                log(f"  ❌ {os.path.basename(name)}: {e}")
+                job["errors"].append(f"{name}: {e}")
+
 # ─── Push to Supabase ─────────────────────────────────────────────────────────
 def push_to_supabase(df, store):
     today = str(date.today())
@@ -217,9 +232,9 @@ def push_to_supabase(df, store):
         master.append({
             "barcode":  barcode,
             "name":     str(row.get("name",""))[:300].strip(),
-            "brand":    str(row.get("brand",""))[:200].strip()   if pd.notna(row.get("brand"))    else None,
+            "brand":    str(row.get("brand",""))[:200].strip()    if pd.notna(row.get("brand"))    else None,
             "category": str(row.get("category",""))[:200].strip() if pd.notna(row.get("category")) else None,
-            "unit":     str(row.get("unit",""))[:50].strip()     if pd.notna(row.get("unit"))     else None,
+            "unit":     str(row.get("unit",""))[:50].strip()      if pd.notna(row.get("unit"))     else None,
         })
         prices.append({
             "barcode":       barcode,
@@ -236,199 +251,109 @@ def push_to_supabase(df, store):
     log(f"  ✓ {n1} products, {n2} prices saved")
     return n1
 
-# ─── Process ZIP bytes ────────────────────────────────────────────────────────
-def process_zip_bytes(zip_bytes, store, ext="csv"):
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        names = [n for n in zf.namelist()
-                 if n.lower().endswith(f".{ext}") and not n.startswith("__")]
-        log(f"  ZIP: {len(names)} .{ext} files")
-        job["total"] += len(names)
-        for i, name in enumerate(names):
-            job["current_file"] = os.path.basename(name)
-            try:
-                data = zf.read(name)
-                df = parse_csv(data, store, filename=name) if ext=="csv" else parse_xml(data, store, filename=name)
-                log(f"  [{i+1}/{len(names)}] {os.path.basename(name)} — {len(df)} rows")
-                push_to_supabase(df, store)
-                job["processed"] += 1
-            except Exception as e:
-                log(f"  ❌ {os.path.basename(name)}: {e}")
-                job["errors"].append(f"{name}: {e}")
-
-# ─── Store downloaders ────────────────────────────────────────────────────────
-
-def download_lidl():
-    log("🔵 LIDL — downloading ZIP...")
-    today = date.today()
-    date_str = today.strftime("%d_%m_%Y")  # 20_03_2026
-    url = f"https://tvrtka.lidl.hr/content/download/156615/fileupload/Popis_cijena_po_trgovinama_na_dan_{date_str}.zip"
-    log(f"  URL: {url}")
-    r = requests.get(url, headers=HEADERS, timeout=120)
-    if r.status_code == 404:
-        # Try yesterday in case today's file isn't published yet
-        yesterday = today - timedelta(days=1)
-        date_str = yesterday.strftime("%d_%m_%Y")
-        url = f"https://tvrtka.lidl.hr/content/download/156615/fileupload/Popis_cijena_po_trgovinama_na_dan_{date_str}.zip"
-        log(f"  Today not found, trying yesterday: {url}")
-        r = requests.get(url, headers=HEADERS, timeout=120)
-    r.raise_for_status()
-    log(f"  Downloaded {len(r.content)//1024} KB")
-    process_zip_bytes(r.content, "lidl", "csv")
-
-def download_tommy():
-    log("🟠 TOMMY — downloading ZIP...")
-    url = "https://www.tommy.hr/fileadmin/user_upload/cjenik.zip"
-    r = requests.get(url, headers=HEADERS, timeout=120)
-    r.raise_for_status()
-    log(f"  Downloaded {len(r.content)//1024} KB")
-    process_zip_bytes(r.content, "tommy", "csv")
-
+# ─── Single file downloader (used by concurrent workers) ─────────────────────
 def _download_one_csv(url, store):
-    """Download a single CSV file and push to Supabase."""
-    filename = url.split("/")[-1]
+    filename = url.split("?title=")[-1] if "?title=" in url else url.split("/")[-1]
     try:
         r = requests.get(url, headers=HEADERS, timeout=60)
         r.raise_for_status()
         df = parse_csv(r.content, store, filename=filename)
         push_to_supabase(df, store)
         job["processed"] += 1
-        job["current_file"] = filename
+        job["current_file"] = filename[:80]
         return len(df)
     except Exception as e:
-        err = f"{filename}: {e}"
+        err = f"{filename[:60]}: {e}"
         log(f"  ❌ {err}")
         job["errors"].append(err)
         return 0
 
-def download_from_index(store, index_url, base_url, date_pattern=None):
-    """
-    Generic index page downloader.
-    Fetches the index page, finds all CSV links matching today's date,
-    downloads them concurrently.
-    """
-    today = date.today()
-    # Date patterns stores use in filenames
-    date_str_ymd  = today.strftime("%Y%m%d")  # 20260320
-    date_str_dmy  = today.strftime("%d%m%Y")  # 20032026
+# ─── Store downloaders ────────────────────────────────────────────────────────
+def download_lidl():
+    log("🔵 LIDL — downloading ZIP...")
+    for delta in [0, 1]:
+        d = (date.today() - timedelta(days=delta)).strftime("%d_%m_%Y")
+        url = f"https://tvrtka.lidl.hr/content/download/156615/fileupload/Popis_cijena_po_trgovinama_na_dan_{d}.zip"
+        log(f"  Trying: {url}")
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=120)
+            if r.status_code == 200:
+                log(f"  ✓ {len(r.content)//1024} KB")
+                process_zip_bytes(r.content, "lidl", "csv")
+                return
+        except Exception:
+            continue
+    raise ValueError("Lidl ZIP not found for today or yesterday")
 
-    log(f"  Fetching index: {index_url}")
-    try:
-        r = requests.get(index_url, headers=HEADERS, timeout=30)
-        r.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Could not fetch index page: {e}")
-
-    html = r.text
-
-    # Find all CSV links in the page
-    all_links = re.findall(r'href=["\']([^"\']+\.csv)["\']', html, re.IGNORECASE)
-    if not all_links:
-        # Try plain text URLs
-        all_links = re.findall(r'https?://[^\s"\'<>]+\.csv', html, re.IGNORECASE)
-
-    if not all_links:
-        raise ValueError(f"No CSV links found on index page. HTML length: {len(html)}")
-
-    # Filter to today's files if date pattern found
-    today_links = [l for l in all_links if date_str_ymd in l or date_str_dmy in l]
-    if not today_links:
-        log(f"  ⚠️  No files for today ({date_str_ymd}), using all {len(all_links)} links found")
-        today_links = all_links
-
-    # Make absolute URLs
-    csv_urls = []
-    for link in today_links:
-        if link.startswith("http"):
-            csv_urls.append(link)
-        elif link.startswith("/"):
-            base = "/".join(base_url.split("/")[:3])
-            csv_urls.append(base + link)
-        else:
-            csv_urls.append(base_url.rstrip("/") + "/" + link)
-
-    csv_urls = list(dict.fromkeys(csv_urls))  # deduplicate
-    log(f"  Found {len(csv_urls)} files for today")
-    job["total"] += len(csv_urls)
-
-    # Download concurrently — 8 workers
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_download_one_csv, url, store): url for url in csv_urls}
-        for i, future in enumerate(as_completed(futures)):
-            n = future.result()
-            log(f"  [{job['processed']}/{len(csv_urls)}] {n} products")
+def download_tommy():
+    log("🟠 TOMMY — downloading ZIP...")
+    r = requests.get("https://www.tommy.hr/fileadmin/user_upload/cjenik.zip", headers=HEADERS, timeout=120)
+    r.raise_for_status()
+    log(f"  ✓ {len(r.content)//1024} KB")
+    process_zip_bytes(r.content, "tommy", "csv")
 
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
-    today_str = date.today().strftime("%Y%m%d")  # 20260321
+    today_str = date.today().strftime("%Y%m%d")
     json_url = f"https://www.spar.hr/datoteke_cjenici/Cjenik{today_str}.json"
     log(f"  URL: {json_url}")
-
     r = requests.get(json_url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-
     data = r.json()
     if not data:
-        raise ValueError(f"Spar JSON is empty — files not published yet for {today_str}")
+        raise ValueError(f"Spar JSON empty — files not published yet for {today_str}")
 
-    # JSON contains list of filenames or objects with filename
-    # Extract URLs — handle both [{"naziv": "file.csv", "url": "..."}, ...] 
-    # and plain ["file.csv", ...] formats
     csv_urls = []
     for item in data:
         if isinstance(item, dict):
-            url = item.get("url") or item.get("URL") or item.get("naziv") or item.get("name")
+            url = item.get("url") or item.get("URL") or item.get("naziv") or item.get("name") or ""
         else:
             url = str(item)
-        if url:
+        if url and url.lower().endswith(".csv"):
             if not url.startswith("http"):
-                url = f"https://www.spar.hr/datoteke_cjenici/{url}"
-            if url.lower().endswith(".csv"):
-                csv_urls.append(url)
+                url = f"https://www.spar.hr/datoteke_cjenici/{url.lstrip('/')}"
+            csv_urls.append(url)
 
     log(f"  Found {len(csv_urls)} files")
     job["total"] += len(csv_urls)
-
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_download_one_csv, url, "spar"): url
-                   for url in csv_urls}
+        futures = {pool.submit(_download_one_csv, url, "spar"): url for url in csv_urls}
         for future in as_completed(futures):
             future.result()
 
 def download_konzum():
     log("🔴 KONZUM — fetching file list...")
-    today_str = date.today().strftime("%Y-%m-%d")
     base = "https://www.konzum.hr"
-    csv_urls = []
-    page = 1
-
-    while True:
-        url = f"{base}/cjenici?date={today_str}&page={page}"
-        log(f"  Page {page}: {url}")
-        r = requests.get(url, headers=HEADERS, timeout=30)
-        if r.status_code != 200:
+    for delta in [0, 1]:
+        check_date = date.today() - timedelta(days=delta)
+        date_str = check_date.strftime("%Y-%m-%d")
+        csv_urls = []
+        page = 1
+        while True:
+            url = f"{base}/cjenici?date={date_str}&page={page}"
+            r = requests.get(url, headers=HEADERS, timeout=30)
+            if r.status_code != 200:
+                break
+            links = re.findall(r'href="(/cjenici/download\?title=[^"]+)"', r.text)
+            if not links:
+                break
+            for link in links:
+                full_url = base + link
+                if full_url not in csv_urls:
+                    csv_urls.append(full_url)
+            if f"page={page+1}" not in r.text:
+                break
+            page += 1
+        if csv_urls:
+            log(f"  Found {len(csv_urls)} files for {date_str}")
             break
-
-        # Find all download links
-        links = re.findall(r'href="(/cjenici/download\?title=[^"]+)"', r.text)
-        if not links:
-            break
-
-        for link in links:
-            full_url = base + link
-            if full_url not in csv_urls:
-                csv_urls.append(full_url)
-
-        # Check if there's a next page
-        if f'page={page+1}' not in r.text:
-            break
-        page += 1
-
-    log(f"  Found {len(csv_urls)} files for today")
+        else:
+            log(f"  No files for {date_str}, trying previous day...")
+    if not csv_urls:
+        raise ValueError("No Konzum files found for today or yesterday")
     job["total"] += len(csv_urls)
-
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_download_one_csv, url, "konzum"): url
-                   for url in csv_urls}
+        futures = {pool.submit(_download_one_csv, url, "konzum"): url for url in csv_urls}
         for future in as_completed(futures):
             future.result()
 
@@ -438,22 +363,16 @@ def download_kaufland():
     r = requests.get(json_url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     files = r.json()
-
-    # Filter to today's files — date format in filename is DDMMYYYY
-    today_str = date.today().strftime("%d%m%Y")  # e.g. 21032026
+    today_str = date.today().strftime("%d%m%Y")
     today_files = [f for f in files if today_str in f["label"]]
-
     if not today_files:
-        # Try yesterday as fallback
         yesterday_str = (date.today() - timedelta(days=1)).strftime("%d%m%Y")
         today_files = [f for f in files if yesterday_str in f["label"]]
-        log(f"  No files for today, using yesterday ({yesterday_str}): {len(today_files)} files")
+        log(f"  No files for today, using yesterday: {len(today_files)} files")
     else:
         log(f"  Found {len(today_files)} files for today")
-
     job["total"] += len(today_files)
     csv_urls = ["https://www.kaufland.hr" + f["path"] for f in today_files]
-
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_download_one_csv, url, "kaufland"): url for url in csv_urls}
         for future in as_completed(futures):
@@ -461,28 +380,25 @@ def download_kaufland():
 
 def download_plodine():
     log("🟣 PLODINE — downloading ZIP...")
-    today = date.today()
-    d = today.strftime("%d_%m_%Y")  # 21_03_2026
-
-    # Try common publish times — they usually publish around 07:00
+    d = date.today().strftime("%d_%m_%Y")
     candidate_times = [
-        "07_00_01", "07_00_00", "07_01_00", "07_05_00",
-        "06_55_00", "06_59_00", "07_10_00", "07_30_00",
+        "07_00_01","07_00_00","07_01_00","07_05_00",
+        "06_55_00","06_59_00","07_10_00","07_30_00",
+        "08_00_00","08_00_01",
     ]
-
     for t in candidate_times:
         url = f"https://www.plodine.hr/cjenici/cjenici_{d}_{t}.zip"
         log(f"  Trying: {url}")
         try:
             r = requests.get(url, headers=HEADERS, timeout=60)
             if r.status_code == 200:
-                log(f"  ✓ Found! {len(r.content)//1024} KB")
+                log(f"  ✓ {len(r.content)//1024} KB")
                 process_zip_bytes(r.content, "plodine", "csv")
                 return
         except Exception:
             continue
+    raise ValueError(f"Plodine ZIP not found for {d}")
 
-    raise ValueError(f"Could not find Plodine ZIP for {d} — tried {len(candidate_times)} time variants")
 STORE_DOWNLOADERS = {
     "lidl":     download_lidl,
     "tommy":    download_tommy,
@@ -499,14 +415,12 @@ def run_cleanup():
     log("🧹 Cleaning up prices older than 7 days...")
     resp = requests.post(
         f"{SUPABASE_URL}/rest/v1/rpc/cleanup_old_prices",
-        headers=db_headers(),
-        json={},
-        timeout=30,
+        headers=db_headers(), json={}, timeout=30,
     )
-    if resp.status_code == 200:
+    if resp.status_code in (200, 204):
         log("  ✓ Cleanup done")
     else:
-        log(f"  ⚠️  Cleanup: {resp.status_code} {resp.text[:100]}")
+        log(f"  ⚠️  Cleanup: {resp.status_code}")
 
 # ─── Background job ───────────────────────────────────────────────────────────
 def run_job(stores, manual_files=None, manual_store=None):
@@ -516,9 +430,7 @@ def run_job(stores, manual_files=None, manual_store=None):
         "errors": [], "log": [],
         "store": ", ".join(stores) if stores else manual_store,
     })
-
     try:
-        # Manual file uploads
         if manual_files:
             log(f"🚀 Manual upload: {len(manual_files)} file(s) for '{manual_store}'")
             job["total"] = len(manual_files)
@@ -544,12 +456,11 @@ def run_job(stores, manual_files=None, manual_store=None):
                     if os.path.exists(filepath):
                         os.remove(filepath)
         else:
-            # Auto-download
             log(f"🌐 Auto-download: {stores}")
             for store in stores:
                 job["store"] = store
                 if store not in STORE_DOWNLOADERS:
-                    log(f"  ⚠️  No downloader for {store} — skipping")
+                    log(f"  ⚠️  No downloader for {store}")
                     continue
                 try:
                     STORE_DOWNLOADERS[store]()
@@ -557,9 +468,7 @@ def run_job(stores, manual_files=None, manual_store=None):
                     log(f"  ❌ {store} failed: {e}")
                     job["errors"].append(f"{store}: {e}")
 
-        # Always cleanup after run
         run_cleanup()
-
         job["status"] = "done"
         log(f"\n✅ Done! {job['processed']} files. Errors: {len(job['errors'])}")
 
@@ -584,7 +493,7 @@ HTML = """<!DOCTYPE html>
     h2{font-size:15px;font-weight:600;margin:0 0 14px}
     label{font-size:13px;color:#555;display:block;margin-bottom:4px;font-weight:500}
     input[type=password]{width:100%;padding:8px 10px;border:1px solid #ddd;border-radius:6px;font-size:14px;margin-bottom:14px}
-    .store-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-bottom:14px}
+    .sg{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin-bottom:14px}
     .sb{padding:8px;border:1px solid #ddd;border-radius:6px;font-size:13px;cursor:pointer;background:white;text-align:center;transition:all .15s;user-select:none}
     .sb:hover{border-color:#111}.sb.sel{border-color:#111;background:#111;color:white}
     .drop{border:2px dashed #ddd;border-radius:8px;padding:24px;text-align:center;cursor:pointer;margin-bottom:10px;transition:border-color .2s}
@@ -607,12 +516,11 @@ HTML = """<!DOCTYPE html>
 <body>
   <h1>katalog-prices</h1>
   <p class="sub">Croatian grocery price pipeline</p>
-
   <div class="card">
     <label>Password</label>
     <input type="password" id="pw" placeholder="Enter password">
     <label>Store</label>
-    <div class="store-grid">
+    <div class="sg">
       <div class="sb sel" onclick="sel('konzum',this)">Konzum</div>
       <div class="sb" onclick="sel('spar',this)">Spar</div>
       <div class="sb" onclick="sel('lidl',this)">Lidl</div>
@@ -625,19 +533,17 @@ HTML = """<!DOCTYPE html>
     </div>
     <input type="hidden" id="store" value="konzum">
   </div>
-
   <div class="card">
     <h2>Auto-download from store website</h2>
-    <p class="hint">Downloads today's price files directly from the store's official website — no manual work</p>
+    <p class="hint">Downloads today's price files directly — no manual work needed</p>
     <div class="row">
       <button class="btn btn-green btn-sm" onclick="go('auto','selected')">Download selected store</button>
       <button class="btn btn-blue btn-sm" onclick="go('auto','all')">Download ALL stores</button>
     </div>
   </div>
-
   <div class="card">
     <h2>Manual upload (fallback)</h2>
-    <p class="hint">Upload CSV, XML or ZIP — use when auto-download fails for a store</p>
+    <p class="hint">Upload CSV, XML or ZIP — use for Studenac, Žabac, NTL</p>
     <div class="drop" id="drop"
          onclick="document.getElementById('fi').click()"
          ondragover="event.preventDefault();this.classList.add('drag')"
@@ -649,7 +555,6 @@ HTML = """<!DOCTYPE html>
     <input type="file" id="fi" accept=".csv,.xml,.zip,.CSV,.XML,.ZIP" multiple onchange="updateCnt()">
     <button class="btn btn-dark" onclick="go('upload')">Upload & ingest</button>
   </div>
-
   <div class="card">
     <div class="stats">
       <div>Status: <b><span id="st">idle</span></b></div>
@@ -659,20 +564,17 @@ HTML = """<!DOCTYPE html>
     <div style="font-size:12px;color:#666;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="cf"></div>
     <div id="log">Waiting...</div>
   </div>
-
 <script>
 let curStore='konzum';
 function sel(s,el){curStore=s;document.getElementById('store').value=s;document.querySelectorAll('.sb').forEach(b=>b.classList.remove('sel'));el.classList.add('sel');}
 function updateCnt(){const f=document.getElementById('fi').files;document.getElementById('cnt').textContent=f.length?`${f.length} file${f.length>1?'s':''} selected`:'';}
 function handleDrop(e){e.preventDefault();document.getElementById('drop').classList.remove('drag');document.getElementById('fi').files=e.dataTransfer.files;updateCnt();}
 function disableBtns(v){document.querySelectorAll('.btn').forEach(b=>b.disabled=v);}
-
 async function go(mode,sub){
   const pw=document.getElementById('pw').value;
   if(!pw){alert('Enter password');return;}
   const fd=new FormData();
-  fd.append('password',pw);
-  fd.append('mode',mode);
+  fd.append('password',pw);fd.append('mode',mode);
   if(mode==='auto'){
     fd.append('stores',sub==='all'?'all':curStore);
   } else {
@@ -688,7 +590,6 @@ async function go(mode,sub){
   if(!r.ok){document.getElementById('log').textContent='❌ '+d.error;disableBtns(false);return;}
   poll();
 }
-
 async function poll(){
   const d=await(await fetch('/status')).json();
   const cls=d.status==='done'?'done':d.status==='error'?'err':'proc';
@@ -716,21 +617,16 @@ def start_ingest():
         return jsonify({"error": "Already running"}), 400
     if request.form.get("password") != UPLOAD_PASSWORD:
         return jsonify({"error": "Wrong password"}), 403
-
     mode = request.form.get("mode", "upload")
-
     if mode == "auto":
         stores_param = request.form.get("stores", "all")
         stores = ALL_STORES if stores_param == "all" else [stores_param]
         threading.Thread(target=run_job, kwargs={"stores": stores}, daemon=True).start()
         return jsonify({"ok": True})
-
-    # Manual upload
     store = request.form.get("store", "konzum")
     files = request.files.getlist("files")
     if not files:
         return jsonify({"error": "No files"}), 400
-
     filepaths = []
     for i, f in enumerate(files):
         name = f.filename.lower()
@@ -738,7 +634,6 @@ def start_ingest():
         tmp = f"/tmp/prices_{store}_{i}_{date.today()}.{ext}"
         f.save(tmp)
         filepaths.append(tmp)
-
     threading.Thread(target=run_job,
                      kwargs={"stores": [], "manual_files": filepaths, "manual_store": store},
                      daemon=True).start()
@@ -746,7 +641,6 @@ def start_ingest():
 
 @app.route("/daily", methods=["GET", "POST"])
 def daily():
-    """Called by UptimeRobot or a cron service to run daily auto-download."""
     secret = request.args.get("secret") or request.form.get("secret")
     if secret != UPLOAD_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 403
@@ -755,20 +649,13 @@ def daily():
     threading.Thread(target=run_job, kwargs={"stores": ALL_STORES}, daemon=True).start()
     return jsonify({"status": "started", "stores": ALL_STORES})
 
-@app.route("/cleanup", methods=["POST"])
-def cleanup():
-    if request.form.get("password") != UPLOAD_PASSWORD:
-        return jsonify({"error": "Wrong password"}), 403
-    run_cleanup()
-    return jsonify({"ok": True})
-
 @app.route("/status")
 def status():
     return jsonify({k: job[k] for k in job})
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "db_rows": "see /status"})
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5001)), debug=False)
