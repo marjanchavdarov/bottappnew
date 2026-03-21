@@ -317,8 +317,10 @@ def download_spar():
     today_str = date.today().strftime("%Y%m%d")
     json_url = f"https://www.spar.hr/datoteke_cjenici/Cjenik{today_str}.json"
     log(f"  URL: {json_url}")
-    r = requests.get(json_url, headers=HEADERS, timeout=30)
+    r = requests.get(json_url, headers={**HEADERS, "Accept-Encoding": "gzip, deflate"}, timeout=30)
     r.raise_for_status()
+    log(f"  Content-Type: {r.headers.get('content-type','?')} Size: {len(r.content)} bytes")
+    log(f"  First 100 bytes: {r.content[:100]}")
     data = r.json()
     if not data:
         raise ValueError(f"Spar JSON empty — files not published yet for {today_str}")
