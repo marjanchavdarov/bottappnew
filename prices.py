@@ -25,7 +25,11 @@ SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY         = os.environ.get("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; katalog-prices/1.0)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://www.kaufland.hr/",
+    "Accept": "text/csv,application/octet-stream,*/*",
+}
 
 job = {
     "running": False, "status": "idle", "store": "",
@@ -257,6 +261,12 @@ def _download_one_csv(url, store):
     try:
         r = requests.get(url, headers=HEADERS, timeout=60)
         r.raise_for_status()
+
+        # Detect HTML error page — CDN sometimes returns HTML instead of CSV
+        content_type = r.headers.get("content-type", "")
+        if "text/html" in content_type or r.content[:5] == b"<!DOC" or r.content[:5] == b"<html":
+            raise ValueError(f"Got HTML instead of CSV (HTTP {r.status_code}, CT: {content_type})")
+
         df = parse_csv(r.content, store, filename=filename)
         push_to_supabase(df, store)
         job["processed"] += 1
