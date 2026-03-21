@@ -25,11 +25,7 @@ SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY         = os.environ.get("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.kaufland.hr/",
-    "Accept": "text/csv,application/octet-stream,*/*",
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; katalog-prices/1.0)"}
 
 job = {
     "running": False, "status": "idle", "store": "",
@@ -228,8 +224,10 @@ def process_zip_bytes(zip_bytes, store, ext="csv"):
 # ─── Push to Supabase ─────────────────────────────────────────────────────────
 def push_to_supabase(df, store):
     today = str(date.today())
-    master, prices = [], []
-    for _, row in df.iterrows():
+
+    # Build master_products records
+    master = []
+    for _, row in df.drop_duplicates(subset=["barcode"]).iterrows():
         barcode = str(row.get("barcode","")).strip()
         if not barcode or barcode == "nan":
             continue
@@ -240,19 +238,37 @@ def push_to_supabase(df, store):
             "category": str(row.get("category",""))[:200].strip() if pd.notna(row.get("category")) else None,
             "unit":     str(row.get("unit",""))[:50].strip()      if pd.notna(row.get("unit"))     else None,
         })
+
+    # Aggregate prices per barcode — min, max, locations_count
+    df_clean = df[df["barcode"].notna() & (df["barcode"] != "nan") & df["current_price"].notna()].copy()
+    agg = df_clean.groupby("barcode").agg(
+        min_price=("current_price", "min"),
+        max_price=("current_price", "max"),
+        current_price=("current_price", "mean"),
+        regular_price=("regular_price", "min"),
+        sale_price=("sale_price", "min"),
+        is_on_sale=("is_on_sale", "any"),
+        locations_count=("barcode", "count"),
+    ).reset_index()
+
+    prices = []
+    for _, row in agg.iterrows():
         prices.append({
-            "barcode":       barcode,
-            "store":         store,
-            "location":      str(row.get("location",""))[:200],
-            "price_date":    today,
-            "current_price": float(row["current_price"]) if pd.notna(row.get("current_price")) else None,
-            "regular_price": float(row["regular_price"]) if pd.notna(row.get("regular_price")) else None,
-            "sale_price":    float(row["sale_price"])    if pd.notna(row.get("sale_price"))    else None,
-            "is_on_sale":    bool(row.get("is_on_sale", False)),
+            "barcode":         str(row["barcode"]).strip(),
+            "store":           store,
+            "price_date":      today,
+            "min_price":       round(float(row["min_price"]), 2),
+            "max_price":       round(float(row["max_price"]), 2),
+            "current_price":   round(float(row["current_price"]), 2),
+            "regular_price":   round(float(row["regular_price"]), 2) if pd.notna(row.get("regular_price")) else None,
+            "sale_price":      round(float(row["sale_price"]), 2)    if pd.notna(row.get("sale_price"))    else None,
+            "is_on_sale":      bool(row["is_on_sale"]),
+            "locations_count": int(row["locations_count"]),
         })
+
     n1 = upsert("master_products", master, conflict="barcode")
-    n2 = upsert("store_prices",    prices, conflict="barcode,store,location,price_date")
-    log(f"  ✓ {n1} products, {n2} prices saved")
+    n2 = upsert("store_prices",    prices, conflict="barcode,store,price_date")
+    log(f"  ✓ {n1} products, {n2} prices saved ({len(prices)} unique barcodes, {df_clean['locations_count'].sum() if 'locations_count' in df_clean.columns else len(df_clean)} location rows aggregated)")
     return n1
 
 # ─── Single file downloader (used by concurrent workers) ─────────────────────
@@ -261,12 +277,6 @@ def _download_one_csv(url, store):
     try:
         r = requests.get(url, headers=HEADERS, timeout=60)
         r.raise_for_status()
-
-        # Detect HTML error page — CDN sometimes returns HTML instead of CSV
-        content_type = r.headers.get("content-type", "")
-        if "text/html" in content_type or r.content[:5] == b"<!DOC" or r.content[:5] == b"<html":
-            raise ValueError(f"Got HTML instead of CSV (HTTP {r.status_code}, CT: {content_type})")
-
         df = parse_csv(r.content, store, filename=filename)
         push_to_supabase(df, store)
         job["processed"] += 1
