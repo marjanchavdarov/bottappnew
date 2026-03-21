@@ -107,23 +107,34 @@ def location_from_filename(filename):
 
 # ─── Parse CSV ────────────────────────────────────────────────────────────────
 def parse_csv(src, store, filename=""):
-    for encoding in ["utf-8", "utf-8-sig", "cp1250", "latin-1"]:
+    # Always work with raw bytes so we can retry encodings cleanly
+    if isinstance(src, (bytes, bytearray)):
+        raw = bytes(src)
+    elif isinstance(src, io.BytesIO):
+        src.seek(0)
+        raw = src.read()
+    else:
+        # filepath string
+        with open(src, "rb") as f:
+            raw = f.read()
+
+    df = None
+    for encoding in ["utf-8-sig", "utf-8", "utf-16", "utf-16-le", "cp1250", "latin-1"]:
         try:
-            if isinstance(src, (bytes, bytearray)):
-                data = io.BytesIO(src)
-            elif isinstance(src, io.BytesIO):
-                src.seek(0)
-                data = src
-            else:
-                data = src
-            df = pd.read_csv(data, sep=None, engine="python",
-                             encoding=encoding, dtype=str, skipinitialspace=True)
+            df = pd.read_csv(
+                io.BytesIO(raw),   # fresh BytesIO every attempt
+                sep=None,
+                engine="python",
+                encoding=encoding,
+                dtype=str,
+                skipinitialspace=True,
+            )
+            log(f"  Encoding: {encoding} — {len(df)} rows")
             break
         except Exception:
-            if isinstance(src, (bytes, bytearray)):
-                pass
             continue
-    else:
+
+    if df is None:
         raise ValueError("Could not decode CSV")
 
     df.columns = [c.strip() for c in df.columns]
@@ -150,7 +161,6 @@ def parse_csv(src, store, filename=""):
     df["store"]         = store
     df["location"]      = location_from_filename(filename)
     return df
-
 # ─── Parse XML ────────────────────────────────────────────────────────────────
 def parse_xml(src, store, filename=""):
     if isinstance(src, (bytes, bytearray)):
