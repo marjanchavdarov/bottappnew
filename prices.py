@@ -421,13 +421,29 @@ def download_kaufland():
             future.result()
 
 def download_plodine():
-    log("🟣 PLODINE — fetching index...")
-    download_from_index(
-        store="plodine",
-        index_url="https://www.plodine.hr/info-o-cijenama/",
-        base_url="https://www.plodine.hr/",
-    )
+    log("🟣 PLODINE — downloading ZIP...")
+    today = date.today()
+    d = today.strftime("%d_%m_%Y")  # 21_03_2026
 
+    # Try common publish times — they usually publish around 07:00
+    candidate_times = [
+        "07_00_01", "07_00_00", "07_01_00", "07_05_00",
+        "06_55_00", "06_59_00", "07_10_00", "07_30_00",
+    ]
+
+    for t in candidate_times:
+        url = f"https://www.plodine.hr/cjenici/cjenici_{d}_{t}.zip"
+        log(f"  Trying: {url}")
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=60)
+            if r.status_code == 200:
+                log(f"  ✓ Found! {len(r.content)//1024} KB")
+                process_zip_bytes(r.content, "plodine", "csv")
+                return
+        except Exception:
+            continue
+
+    raise ValueError(f"Could not find Plodine ZIP for {d} — tried {len(candidate_times)} time variants")
 STORE_DOWNLOADERS = {
     "lidl":     download_lidl,
     "tommy":    download_tommy,
