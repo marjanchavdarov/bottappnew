@@ -322,22 +322,48 @@ def download_lidl():
 def download_tommy():
     log("🟠 TOMMY — fetching via spiza.tommy.hr API...")
     today_str = date.today().strftime("%Y-%m-%d")
-    api_headers = {**HEADERS, "Accept": "application/json"}
+
+    # Sylius/Hydra API requires application/ld+json
+    api_headers = {**HEADERS, "Accept": "application/ld+json"}
+
     for delta in [0, 1]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
         url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={d}"
         log(f"  Trying: {url}")
-        r = requests.get(url, headers=api_headers, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        members = data.get("hydra:member", [])
-        if members:
-            log(f"  Found {len(members)} entries")
-            log(f"  First entry keys: {list(members[0].keys())}")
-            log(f"  First entry: {str(members[0])[:400]}")
-            return
-    raise ValueError("Tommy: no data found for today or yesterday")
+        try:
+            r = requests.get(url, headers=api_headers, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            members = data.get("hydra:member", [])
+            if members:
+                log(f"  Found {len(members)} entries")
+                log(f"  First entry keys: {list(members[0].keys())}")
+                log(f"  First entry: {str(members[0])[:500]}")
+                # Extract CSV URLs
+                csv_urls = []
+                for item in members:
+                    for field in ["filePath", "file", "url", "csvFile", "path", "downloadUrl", "fileUrl"]:
+                        val = item.get(field, "")
+                        if val and ".csv" in val.lower():
+                            if not val.startswith("http"):
+                                val = "https://spiza.tommy.hr" + val
+                            csv_urls.append(val)
+                            break
+                log(f"  Found {len(csv_urls)} CSV URLs")
+                if not csv_urls:
+                    log(f"  ⚠️  No CSV URLs. Full first item: {members[0]}")
+                    return
+                job["total"] += len(csv_urls)
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = {pool.submit(_download_one_csv, u, "tommy"): u for u in csv_urls}
+                    for future in as_completed(futures):
+                        future.result()
+                return
+        except Exception as e:
+            log(f"  delta={delta} failed: {e}")
+            continue
 
+    raise ValueError("Tommy: no data for today or yesterday")
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
     today_str = date.today().strftime("%Y%m%d")
