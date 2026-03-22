@@ -390,6 +390,7 @@ def download_kaufland():
     r = requests.get(json_url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     files = r.json()
+
     today_str = date.today().strftime("%d%m%Y")
     today_files = [f for f in files if today_str in f["label"]]
     if not today_files:
@@ -404,8 +405,6 @@ def download_kaufland():
 
     job["total"] += len(today_files)
 
-    # Sequential download with delay — concurrent requests get rate-limited
-    import time
     for idx, f in enumerate(today_files):
         url = "https://www.kaufland.hr" + f["path"]
         filename = url.split("/")[-1]
@@ -414,23 +413,49 @@ def download_kaufland():
             r = requests.get(url, headers=HEADERS, timeout=60)
             r.raise_for_status()
 
-            # Bail if CDN returned HTML instead of CSV
-            if r.content[:15].lower().lstrip().startswith((b"<!doctype", b"<html")):
-                log(f"  ❌ {filename}: CDN returned HTML (rate limited)")
-                job["errors"].append(f"{filename}: CDN returned HTML")
-                time.sleep(2)
+            # Kaufland files are UTF-8 BOM + TAB separated — parse directly,
+            # skip the generic sep=None auto-detect which fails on these files
+            df = pd.read_csv(
+                io.BytesIO(r.content),
+                encoding="utf-8-sig",
+                sep="\t",
+                dtype=str,
+                skipinitialspace=True,
+            )
+            df.columns = [c.strip() for c in df.columns]
+            df = fuzzy_rename(df)
+
+            for col in ["regular_price", "sale_price", "lowest_30d_price", "anchor_price"]:
+                if col not in df.columns:
+                    df[col] = None
+                else:
+                    df[col] = pd.to_numeric(
+                        df[col].astype(str).str.strip()
+                            .str.replace(",", ".", regex=False)
+                            .str.replace(r"[^\d.]", "", regex=True),
+                        errors="coerce"
+                    )
+
+            if "barcode" not in df.columns:
+                log(f"  ❌ {filename}: no barcode column. Columns: {list(df.columns)[:8]}")
+                job["errors"].append(f"{filename}: no barcode column")
                 continue
 
-            df = parse_csv(r.content, "kaufland", filename=filename)
+            df["barcode"] = df["barcode"].astype(str).str.strip().str.replace(r"\s+", "", regex=True)
+            df = df[df["barcode"].notna() & (df["barcode"] != "") & (df["barcode"] != "nan")]
+            df["current_price"] = df["sale_price"].combine_first(df["regular_price"])
+            df["is_on_sale"]    = df["sale_price"].notna() & (df["sale_price"] > 0)
+            df["store"]         = "kaufland"
+            df["location"]      = location_from_filename(filename)
+
             push_to_supabase(df, "kaufland")
             job["processed"] += 1
             log(f"  [{idx+1}/{len(today_files)}] ✓ {filename}: {len(df)} rows")
-            time.sleep(0.3)  # be polite, avoid rate limiting
 
         except Exception as e:
             log(f"  ❌ {filename}: {e}")
             job["errors"].append(f"{filename}: {e}")
-
+            
 def download_plodine():
     log("🟣 PLODINE — downloading ZIP...")
     d = date.today().strftime("%d_%m_%Y")
