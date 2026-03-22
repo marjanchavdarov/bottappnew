@@ -320,14 +320,14 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data with debugging"""
+    """Download Tommy price data with debug to see actual response structure"""
     log("🟠 TOMMY — fetching price data from API...")
     
     headers = {**HEADERS, "Accept": "application/ld+json"}
     
     for delta in [0, 1, 2]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
-        files_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}&itemsPerPage=100"
+        files_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}"
         
         try:
             log(f"  Fetching file list for {d}...")
@@ -335,103 +335,62 @@ def download_tommy():
             r.raise_for_status()
             data = r.json()
             
-            files = data.get("hydra:member", [])
-            if not files:
-                log(f"  No files found for {d}")
+            # Log the actual structure to understand what's being returned
+            log(f"  Response keys: {list(data.keys())}")
+            
+            members = data.get("hydra:member", [])
+            if not members:
+                log(f"  No members found")
                 continue
                 
-            log(f"  Found {len(files)} CSV files")
-            job["total"] += len(files)
+            log(f"  Found {len(members)} items")
             
-            all_dfs = []
+            # Log the first item's keys to see what fields are available
+            first_item = members[0]
+            log(f"  First item keys: {list(first_item.keys())}")
+            log(f"  First item content: {first_item}")
             
-            # Download first 3 files as a test
-            test_files = files[:3]
+            # Save the full response for debugging
+            with open(f"tommy_debug_{d}.json", "w") as f:
+                json.dump(data, f, indent=2)
+            log(f"  Full response saved to tommy_debug_{d}.json")
             
-            for idx, file_info in enumerate(test_files):
-                filename = file_info.get("filename")
-                log(f"  [{idx+1}] Testing: {filename}")
+            # Now try to find what field contains the filename/identifier
+            possible_fields = ['filename', 'file', 'name', '@id', 'id', 'title', 'url']
+            for field in possible_fields:
+                if field in first_item:
+                    log(f"  Found field '{field}': {first_item[field]}")
+            
+            # For the first item, try to construct the download URL
+            # Based on the API docs, it should be /api/v2/shop/store-prices-tables/{identifier}
+            # The identifier might be in '@id' or another field
+            identifier = None
+            
+            # Try to extract identifier from @id
+            if '@id' in first_item:
+                # @id looks like /api/v2/shop/store-prices-tables/STORE_NAME
+                path_parts = first_item['@id'].split('/')
+                identifier = path_parts[-1]
+                log(f"  Extracted identifier from @id: {identifier}")
+            
+            # If we found an identifier, test download
+            if identifier:
+                csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{identifier}"
+                log(f"  Testing download: {csv_url}")
                 
-                # Download the CSV
-                csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{filename}"
-                log(f"    URL: {csv_url}")
-                
-                try:
-                    r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
-                    log(f"    Status: {r_csv.status_code}")
-                    log(f"    Content preview: {r_csv.text[:200]}")
+                r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=30)
+                if r_csv.status_code == 200:
+                    df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
+                    log(f"  ✓ Downloaded {len(df)} rows")
+                    log(f"  Columns: {list(df.columns)}")
                     
-                    if r_csv.status_code == 200 and not r_csv.text.startswith('<!DOCTYPE'):
-                        # Parse CSV
-                        df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
-                        log(f"    ✓ Got {len(df)} rows, columns: {list(df.columns)}")
-                        
-                        # If this file has product data (barcode column), process it
-                        if 'BARKOD_ARTIKLA' in df.columns or 'barcode' in df.columns:
-                            log(f"    ✓ This is a product data file!")
-                            df['store'] = 'tommy'
-                            df['location'] = filename.replace('.csv', '')
-                            all_dfs.append(df)
-                        else:
-                            log(f"    ✗ This file has no barcode column. Columns: {list(df.columns)}")
-                            
-                except Exception as e:
-                    log(f"    ✗ Error: {e}")
-                    import traceback
-                    log(traceback.format_exc())
+                    # Process this one file as a test
+                    return process_tommy_dataframe(df)
+                else:
+                    log(f"  ✗ Download failed: {r_csv.status_code}")
             
-            if all_dfs:
-                # Combine and process
-                combined_df = pd.concat(all_dfs, ignore_index=True)
-                log(f"  Total products: {len(combined_df)}")
-                
-                # Rename columns to match your expected format
-                column_map = {
-                    'BARKOD_ARTIKLA': 'barcode',
-                    'SIFRA_ARTIKLA': 'sku',
-                    'NAZIV_ARTIKLA': 'name',
-                    'BRAND': 'brand',
-                    'ROBNA_STRUKTURA': 'category',
-                    'JEDINICA_MJERE': 'unit',
-                    'NETO_KOLICINA': 'quantity',
-                    'MPC': 'regular_price',
-                    'MPC_POSEBNA_PRODAJA': 'sale_price',
-                    'CIJENA_PO_JM': 'price_per_unit',
-                }
-                
-                for old, new in column_map.items():
-                    if old in combined_df.columns and new not in combined_df.columns:
-                        combined_df = combined_df.rename(columns={old: new})
-                
-                # Convert prices to numeric
-                for col in ['regular_price', 'sale_price']:
-                    if col in combined_df.columns:
-                        combined_df[col] = pd.to_numeric(
-                            combined_df[col].astype(str)
-                            .str.replace(',', '.')
-                            .str.replace(r'[^\d.-]', '', regex=True),
-                            errors='coerce'
-                        )
-                
-                # Set current price
-                if 'sale_price' in combined_df.columns:
-                    combined_df['current_price'] = combined_df['sale_price'].combine_first(combined_df.get('regular_price'))
-                else:
-                    combined_df['current_price'] = combined_df.get('regular_price')
-                
-                combined_df['is_on_sale'] = combined_df.get('sale_price', pd.Series([None])).notna() & (combined_df.get('sale_price', 0) > 0)
-                combined_df['store'] = 'tommy'
-                
-                # Filter out rows without barcode
-                combined_df = combined_df[combined_df['barcode'].notna()]
-                
-                if len(combined_df) > 0:
-                    log(f"  ✓ Processing {len(combined_df)} valid records")
-                    push_to_supabase(combined_df, 'tommy')
-                    return
-                else:
-                    log(f"  ⚠️ No valid records after filtering")
-                    
+            break  # Only test the first date
+            
         except Exception as e:
             log(f"  Error: {e}")
             import traceback
