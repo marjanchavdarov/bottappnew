@@ -320,10 +320,14 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data with debug to see actual response structure"""
+    """Download Tommy price data - working implementation"""
     log("🟠 TOMMY — fetching price data from API...")
     
+    # Import json at the top of your file or inside the function
+    import json
+    
     headers = {**HEADERS, "Accept": "application/ld+json"}
+    all_dfs = []
     
     for delta in [0, 1, 2]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
@@ -335,69 +339,73 @@ def download_tommy():
             r.raise_for_status()
             data = r.json()
             
-            # Log the actual structure to understand what's being returned
-            log(f"  Response keys: {list(data.keys())}")
-            
             members = data.get("hydra:member", [])
             if not members:
-                log(f"  No members found")
+                log(f"  No files found for {d}")
                 continue
                 
-            log(f"  Found {len(members)} items")
+            log(f"  Found {len(members)} price files for {d}")
+            job["total"] += len(members)
             
-            # Log the first item's keys to see what fields are available
-            first_item = members[0]
-            log(f"  First item keys: {list(first_item.keys())}")
-            log(f"  First item content: {first_item}")
-            
-            # Save the full response for debugging
-            with open(f"tommy_debug_{d}.json", "w") as f:
-                json.dump(data, f, indent=2)
-            log(f"  Full response saved to tommy_debug_{d}.json")
-            
-            # Now try to find what field contains the filename/identifier
-            possible_fields = ['filename', 'file', 'name', '@id', 'id', 'title', 'url']
-            for field in possible_fields:
-                if field in first_item:
-                    log(f"  Found field '{field}': {first_item[field]}")
-            
-            # For the first item, try to construct the download URL
-            # Based on the API docs, it should be /api/v2/shop/store-prices-tables/{identifier}
-            # The identifier might be in '@id' or another field
-            identifier = None
-            
-            # Try to extract identifier from @id
-            if '@id' in first_item:
-                # @id looks like /api/v2/shop/store-prices-tables/STORE_NAME
-                path_parts = first_item['@id'].split('/')
-                identifier = path_parts[-1]
-                log(f"  Extracted identifier from @id: {identifier}")
-            
-            # If we found an identifier, test download
-            if identifier:
-                csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{identifier}"
-                log(f"  Testing download: {csv_url}")
+            # Process each store's price file
+            for idx, file_info in enumerate(members):
+                # Get the filename (field is 'fileName' with capital N)
+                filename = file_info.get("fileName")
+                if not filename:
+                    # Try to extract from @id if fileName is missing
+                    id_path = file_info.get("@id", "")
+                    filename = id_path.split("/")[-1] if id_path else None
                 
-                r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=30)
-                if r_csv.status_code == 200:
-                    df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
-                    log(f"  ✓ Downloaded {len(df)} rows")
-                    log(f"  Columns: {list(df.columns)}")
+                if not filename:
+                    log(f"  [{idx+1}] Skipping - no filename found")
+                    continue
+                
+                job["current_file"] = f"Processing {filename} ({idx+1}/{len(members)})"
+                
+                # Download the CSV file
+                # URL encode the filename for safety
+                import urllib.parse
+                encoded_filename = urllib.parse.quote(filename)
+                csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{encoded_filename}"
+                
+                try:
+                    r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
                     
-                    # Process this one file as a test
-                    return process_tommy_dataframe(df)
-                else:
-                    log(f"  ✗ Download failed: {r_csv.status_code}")
+                    if r_csv.status_code == 200:
+                        # Parse CSV
+                        df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
+                        log(f"  [{idx+1}] ✓ {filename}: {len(df)} rows")
+                        
+                        # Add store info
+                        df['store'] = 'tommy'
+                        df['location'] = filename
+                        
+                        all_dfs.append(df)
+                        job["processed"] += 1
+                    else:
+                        log(f"  [{idx+1}] ✗ Failed to download {filename}: {r_csv.status_code}")
+                        
+                except Exception as e:
+                    log(f"  [{idx+1}] ✗ Error downloading {filename}: {e}")
+                    job["errors"].append(f"{filename}: {e}")
             
-            break  # Only test the first date
-            
+            # If we got data for this date, process it
+            if all_dfs:
+                break
+                
         except Exception as e:
-            log(f"  Error: {e}")
-            import traceback
-            log(traceback.format_exc())
+            log(f"  Error fetching file list for {d}: {e}")
             continue
     
-    raise ValueError("Tommy: no price data found")
+    if not all_dfs:
+        raise ValueError("Tommy: no price data found")
+    
+    # Combine all dataframes
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    log(f"  Total rows collected: {len(combined_df)}")
+    
+    # Process the dataframe to match your expected format
+    return process_tommy_dataframe(combined_df)
     
 def process_tommy_dataframe(df):
     """Process Tommy DataFrame and push to Supabase"""
