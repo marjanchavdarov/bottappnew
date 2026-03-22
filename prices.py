@@ -320,113 +320,200 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data directly as CSV"""
-    log("🟠 TOMMY — downloading CSV from API...")
+    """Download Tommy price data - handles paginated API"""
+    log("🟠 TOMMY — fetching price data from API...")
     
     api_headers = {
         **HEADERS,
-        "Accept": "text/csv",  # Request CSV format directly
+        "Accept": "application/json",
+        "Content-Type": "application/json",
     }
+    
+    all_data = []
+    page = 1
+    total_pages = None
     
     for delta in [0, 1]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
         
-        # Request CSV format
-        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables.csv?date={d}"
-        
-        try:
-            log(f"  Fetching: {url}")
-            r = requests.get(url, headers=api_headers, timeout=60)
-            r.raise_for_status()
-            
-            # Parse CSV content
-            csv_content = r.content
-            
-            # Check if we got actual data (not HTML error page)
-            if b"<!DOCTYPE" in csv_content[:100]:
-                log(f"  ⚠️ Received HTML instead of CSV for {d}")
-                continue
-            
-            # Parse CSV with pandas
-            df = pd.read_csv(io.BytesIO(csv_content), encoding='utf-8')
-            log(f"  ✓ Downloaded {len(df)} rows for {d}")
-            
-            if len(df) == 0:
-                log(f"  ⚠️ Empty CSV for {d}")
-                continue
-            
-            # Standardize column names
-            df.columns = [c.lower().strip() for c in df.columns]
-            
-            # Map columns to expected format
-            # Common Tommy CSV column names
-            column_mapping = {
-                'barkod': 'barcode',
-                'ean': 'barcode',
-                'naziv': 'name',
-                'marka': 'brand',
-                'mpc': 'regular_price',
-                'akcijska cijena': 'sale_price',
-                'posebna cijena': 'sale_price',
-                'količina': 'quantity',
-                'jedinica mjere': 'unit',
-                'kategorija': 'category',
+        while total_pages is None or page <= total_pages:
+            url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables"
+            params = {
+                'date': d,
+                'page': page,
+                'itemsPerPage': 100  # Max items per page
             }
             
-            for old_name, new_name in column_mapping.items():
-                if old_name in df.columns and new_name not in df.columns:
-                    df = df.rename(columns={old_name: new_name})
-            
-            # Use fuzzy rename for any remaining columns
-            df = fuzzy_rename(df)
-            
-            # Ensure required columns exist
-            if 'barcode' not in df.columns:
-                log(f"  ⚠️ No barcode column. Columns: {list(df.columns)}")
-                continue
-            
-            # Clean barcodes
-            df['barcode'] = df['barcode'].astype(str).str.strip().str.replace(r'\s+', '', regex=True)
-            df = df[df['barcode'].notna() & (df['barcode'] != '') & (df['barcode'] != 'nan')]
-            
-            # Convert price columns
-            for col in ['regular_price', 'sale_price']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(
-                        df[col].astype(str)
-                        .str.replace(',', '.')
-                        .str.replace(r'[^\d.-]', '', regex=True),
-                        errors='coerce'
-                    )
-            
-            # Set current price
-            if 'current_price' not in df.columns:
-                if 'sale_price' in df.columns and 'regular_price' in df.columns:
-                    df['current_price'] = df['sale_price'].combine_first(df['regular_price'])
-                else:
-                    df['current_price'] = df.get('regular_price', df.get('price', None))
-            
-            df['is_on_sale'] = df.get('sale_price', pd.Series([None])).notna() & (df.get('sale_price', 0) > 0)
-            df['store'] = 'tommy'
-            df['location'] = 'Tommy'
-            
-            # Push to Supabase
-            if len(df) > 0:
-                push_to_supabase(df, 'tommy')
-                return  # Success
-            else:
-                log(f"  ⚠️ No valid records after filtering")
+            try:
+                log(f"  Fetching page {page} for {d}...")
+                r = requests.get(url, headers=api_headers, params=params, timeout=60)
+                r.raise_for_status()
                 
-        except requests.exceptions.RequestException as e:
-            log(f"  Error fetching CSV for {d}: {e}")
-            continue
-        except Exception as e:
-            log(f"  Error processing CSV for {d}: {e}")
-            import traceback
-            log(traceback.format_exc())
-            continue
+                data = r.json()
+                
+                # Get total pages from response
+                if total_pages is None and 'hydra:view' in data:
+                    last_page_url = data['hydra:view'].get('hydra:last', '')
+                    if 'page=' in last_page_url:
+                        total_pages = int(last_page_url.split('page=')[1].split('&')[0])
+                    log(f"  Total pages: {total_pages}")
+                
+                # Extract members
+                members = data.get('hydra:member', [])
+                log(f"  Got {len(members)} items on page {page}")
+                
+                if not members:
+                    break
+                
+                all_data.extend(members)
+                
+                # Check if this was the last page
+                if 'hydra:view' in data and 'hydra:next' not in data['hydra:view']:
+                    break
+                    
+                page += 1
+                
+                # Safety limit
+                if page > 100:
+                    break
+                    
+            except Exception as e:
+                log(f"  Error on page {page}: {e}")
+                break
+        
+        if all_data:
+            log(f"  Total items collected: {len(all_data)}")
+            break
+        else:
+            log(f"  No data for {d}")
+            page = 1
+            total_pages = None
     
-    raise ValueError("Tommy: no data found for today or yesterday")
+    if not all_data:
+        raise ValueError("Tommy: no data found")
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(all_data)
+    log(f"  DataFrame columns: {list(df.columns)}")
+    
+    # Process the data
+    return process_tommy_dataframe(df)
+
+def process_tommy_dataframe(df):
+    """Process Tommy DataFrame and push to Supabase"""
+    
+    # Check if this is store data or product data
+    # From the HTML structure, the API returns store-price tables
+    # We need to extract product information from the response
+    
+    # If the data contains product information
+    if 'product' in df.columns or 'name' in df.columns:
+        # Direct product data
+        products_df = df
+    elif 'mpc' in df.columns or 'barcode' in df.columns:
+        # Already has price data
+        products_df = df
+    else:
+        # Might be store metadata - look for nested data
+        log("  Looking for product data in nested structures...")
+        
+        # Check if we have a products or items field
+        for col in df.columns:
+            if isinstance(df[col].iloc[0], dict):
+                # Expand nested dictionaries
+                expanded = pd.json_normalize(df[col])
+                products_df = pd.concat([df.drop(columns=[col]), expanded], axis=1)
+                break
+        else:
+            # If no nested data, assume this is product data already
+            products_df = df
+    
+    # Standardize column names
+    products_df.columns = [c.lower().strip().replace('product.', '').replace('mpc.', '') for c in products_df.columns]
+    
+    # Map columns
+    column_map = {
+        'barkod': 'barcode',
+        'ean': 'barcode',
+        'barcode': 'barcode',
+        'naziv': 'name',
+        'name': 'name',
+        'marka': 'brand',
+        'brand': 'brand',
+        'mpc': 'regular_price',
+        'redovno': 'regular_price',
+        'cijena': 'regular_price',
+        'price': 'regular_price',
+        'posebno': 'sale_price',
+        'akcijska_cijena': 'sale_price',
+        'sale_price': 'sale_price',
+        'kolicina': 'quantity',
+        'quantity': 'quantity',
+        'neto_kolicina': 'quantity',
+        'jedinica_mjere': 'unit',
+        'unit': 'unit',
+        'kategorija': 'category',
+        'category': 'category',
+        'robna_struktura': 'category'
+    }
+    
+    for old, new in column_map.items():
+        if old in products_df.columns and new not in products_df.columns:
+            products_df = products_df.rename(columns={old: new})
+    
+    # Use fuzzy rename as fallback
+    products_df = fuzzy_rename(products_df)
+    
+    # Ensure barcode exists
+    if 'barcode' not in products_df.columns:
+        log(f"  ⚠️ No barcode column. Available: {list(products_df.columns)[:15]}")
+        # Try to find any column that might be barcode
+        for col in products_df.columns:
+            if any(x in col.lower() for x in ['barcode', 'barkod', 'ean', 'sifra', 'code']):
+                products_df = products_df.rename(columns={col: 'barcode'})
+                break
+    
+    if 'barcode' not in products_df.columns:
+        # Save sample for debugging
+        sample_file = f"tommy_sample_{date.today()}.json"
+        products_df.head(5).to_json(sample_file, orient='records', indent=2)
+        log(f"  Sample data saved to {sample_file}")
+        raise ValueError("Cannot find barcode column - check sample file")
+    
+    # Clean barcodes
+    products_df['barcode'] = products_df['barcode'].astype(str).str.strip().str.replace(r'\s+', '', regex=True)
+    products_df = products_df[products_df['barcode'].notna() & (products_df['barcode'] != '') & (products_df['barcode'] != 'nan')]
+    
+    # Process prices
+    for col in ['regular_price', 'sale_price']:
+        if col in products_df.columns:
+            products_df[col] = pd.to_numeric(
+                products_df[col].astype(str)
+                .str.replace(',', '.')
+                .str.replace(r'[^\d.-]', '', regex=True),
+                errors='coerce'
+            )
+    
+    # Set current price
+    if 'sale_price' in products_df.columns:
+        products_df['current_price'] = products_df['sale_price'].combine_first(products_df.get('regular_price'))
+    else:
+        products_df['current_price'] = products_df.get('regular_price')
+    
+    products_df['is_on_sale'] = products_df.get('sale_price', pd.Series([None])).notna() & (products_df.get('sale_price', 0) > 0)
+    products_df['store'] = 'tommy'
+    products_df['location'] = products_df.get('store_name', products_df.get('location', 'Tommy'))
+    
+    # Remove rows without prices
+    products_df = products_df[products_df['current_price'].notna()]
+    
+    if len(products_df) > 0:
+        log(f"  ✓ Processing {len(products_df)} valid price records")
+        push_to_supabase(products_df, 'tommy')
+    else:
+        log(f"  ⚠️ No valid records after filtering")
+    
+    return len(products_df)
     
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
