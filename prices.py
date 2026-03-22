@@ -320,11 +320,10 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data - correct implementation based on API docs"""
+    """Download Tommy price data with debugging"""
     log("🟠 TOMMY — fetching price data from API...")
     
-    # Step 1: Get list of available CSV files
-    headers = {**HEADERS, "Accept": "application/ld+json"}  # JSON-LD format
+    headers = {**HEADERS, "Accept": "application/ld+json"}
     
     for delta in [0, 1, 2]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
@@ -336,7 +335,6 @@ def download_tommy():
             r.raise_for_status()
             data = r.json()
             
-            # Get the list of files
             files = data.get("hydra:member", [])
             if not files:
                 log(f"  No files found for {d}")
@@ -347,53 +345,97 @@ def download_tommy():
             
             all_dfs = []
             
-            # Step 2: Download each CSV file
-            for idx, file_info in enumerate(files):
-                # Get the filename (store identifier)
+            # Download first 3 files as a test
+            test_files = files[:3]
+            
+            for idx, file_info in enumerate(test_files):
                 filename = file_info.get("filename")
-                if not filename:
-                    continue
-                    
-                job["current_file"] = f"Downloading {filename} ({idx+1}/{len(files)})"
+                log(f"  [{idx+1}] Testing: {filename}")
                 
                 # Download the CSV
                 csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{filename}"
-                log(f"    Downloading: {filename}")
+                log(f"    URL: {csv_url}")
                 
                 try:
                     r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
+                    log(f"    Status: {r_csv.status_code}")
+                    log(f"    Content preview: {r_csv.text[:200]}")
                     
                     if r_csv.status_code == 200 and not r_csv.text.startswith('<!DOCTYPE'):
                         # Parse CSV
                         df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
-                        log(f"    ✓ Got {len(df)} products")
+                        log(f"    ✓ Got {len(df)} rows, columns: {list(df.columns)}")
                         
-                        # Add store info
-                        df['store'] = 'tommy'
-                        df['location'] = filename.replace('.csv', '').replace('_', ' ')
-                        
-                        all_dfs.append(df)
-                        job["processed"] += 1
-                    else:
-                        log(f"    ✗ Failed to download CSV: {r_csv.status_code}")
-                        
+                        # If this file has product data (barcode column), process it
+                        if 'BARKOD_ARTIKLA' in df.columns or 'barcode' in df.columns:
+                            log(f"    ✓ This is a product data file!")
+                            df['store'] = 'tommy'
+                            df['location'] = filename.replace('.csv', '')
+                            all_dfs.append(df)
+                        else:
+                            log(f"    ✗ This file has no barcode column. Columns: {list(df.columns)}")
+                            
                 except Exception as e:
-                    log(f"    ✗ Error downloading {filename}: {e}")
-                    job["errors"].append(f"{filename}: {e}")
+                    log(f"    ✗ Error: {e}")
+                    import traceback
+                    log(traceback.format_exc())
             
             if all_dfs:
-                # Combine all store data
+                # Combine and process
                 combined_df = pd.concat(all_dfs, ignore_index=True)
                 log(f"  Total products: {len(combined_df)}")
                 
-                # Process and push to Supabase
-                return process_tommy_dataframe(combined_df)
+                # Rename columns to match your expected format
+                column_map = {
+                    'BARKOD_ARTIKLA': 'barcode',
+                    'SIFRA_ARTIKLA': 'sku',
+                    'NAZIV_ARTIKLA': 'name',
+                    'BRAND': 'brand',
+                    'ROBNA_STRUKTURA': 'category',
+                    'JEDINICA_MJERE': 'unit',
+                    'NETO_KOLICINA': 'quantity',
+                    'MPC': 'regular_price',
+                    'MPC_POSEBNA_PRODAJA': 'sale_price',
+                    'CIJENA_PO_JM': 'price_per_unit',
+                }
                 
-        except requests.exceptions.RequestException as e:
-            log(f"  Error fetching file list for {d}: {e}")
-            continue
+                for old, new in column_map.items():
+                    if old in combined_df.columns and new not in combined_df.columns:
+                        combined_df = combined_df.rename(columns={old: new})
+                
+                # Convert prices to numeric
+                for col in ['regular_price', 'sale_price']:
+                    if col in combined_df.columns:
+                        combined_df[col] = pd.to_numeric(
+                            combined_df[col].astype(str)
+                            .str.replace(',', '.')
+                            .str.replace(r'[^\d.-]', '', regex=True),
+                            errors='coerce'
+                        )
+                
+                # Set current price
+                if 'sale_price' in combined_df.columns:
+                    combined_df['current_price'] = combined_df['sale_price'].combine_first(combined_df.get('regular_price'))
+                else:
+                    combined_df['current_price'] = combined_df.get('regular_price')
+                
+                combined_df['is_on_sale'] = combined_df.get('sale_price', pd.Series([None])).notna() & (combined_df.get('sale_price', 0) > 0)
+                combined_df['store'] = 'tommy'
+                
+                # Filter out rows without barcode
+                combined_df = combined_df[combined_df['barcode'].notna()]
+                
+                if len(combined_df) > 0:
+                    log(f"  ✓ Processing {len(combined_df)} valid records")
+                    push_to_supabase(combined_df, 'tommy')
+                    return
+                else:
+                    log(f"  ⚠️ No valid records after filtering")
+                    
         except Exception as e:
-            log(f"  Unexpected error for {d}: {e}")
+            log(f"  Error: {e}")
+            import traceback
+            log(traceback.format_exc())
             continue
     
     raise ValueError("Tommy: no price data found")
