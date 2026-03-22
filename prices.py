@@ -706,6 +706,31 @@ def download_plodine():
             continue
     raise ValueError(f"Plodine ZIP not found for {d}")
 
+def download_studenac():
+    """Download Studenac price data - uses same ZIP pattern as other stores"""
+    log("🟠 STUDENAC — downloading ZIP...")
+    
+    # Pattern: PROIZVODI-YYYY-MM-DD.zip
+    for delta in [0, 1, 2]:  # Try today and last 2 days
+        d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
+        zip_url = f"https://www.studenac.hr/cjenici/PROIZVODI-{d}.zip"
+        
+        try:
+            log(f"  Trying: {zip_url}")
+            r = requests.get(zip_url, headers=HEADERS, timeout=60)
+            
+            if r.status_code == 200:
+                log(f"  ✓ Found ZIP: {len(r.content)//1024} KB")
+                # process_zip_bytes already handles XML files
+                process_zip_bytes(r.content, "studenac", "xml")
+                return
+                
+        except Exception as e:
+            log(f"  Error: {e}")
+            continue
+    
+    raise ValueError("Studenac: ZIP not found for today or yesterday")
+
 STORE_DOWNLOADERS = {
     "lidl":     download_lidl,
     "tommy":    download_tommy,
@@ -713,6 +738,7 @@ STORE_DOWNLOADERS = {
     "konzum":   download_konzum,
     "kaufland": download_kaufland,
     "plodine":  download_plodine,
+    "studenac": download_studenac, 
 }
 
 ALL_STORES = ["lidl", "tommy", "spar", "konzum", "kaufland", "plodine"]
