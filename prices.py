@@ -12,7 +12,7 @@ import requests
 import pandas as pd
 import xml.etree.ElementTree as ET
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, request, render_template_string
 from dotenv import load_dotenv
@@ -776,582 +776,200 @@ def download_studenac():
     
     raise ValueError("Studenac: ZIP not found for today or yesterday")
 
-class ZabacDownloader:
-    """Zabac price list downloader - Complete with all locations"""
+def download_zabac():
+    """Download Zabac price data from all locations for last 3 days"""
+    log("🟠 ZABAC — downloading price lists from all locations...")
     
-    def __init__(self, supabase_url: str, supabase_key: str):
-        self.supabase: Client = create_client(supabase_url, supabase_key)
-        self.base_url = "https://zabacfoodoutlet.hr"
-        self.store_type = "zabac"
-        
-        # Complete Zabac locations based on their store network
-        self.locations = [
-            # Velika Gorica
-            "Velika Gorica - Supermarket Trg Grada Vukovara 8",
-            
-            # Zagreb locations
-            "Zagreb - Supermarket Ilica 123",
-            "Zagreb - Supermarket Savska 45",
-            "Zagreb - Supermarket Dubrava",
-            "Zagreb - Supermarket Novi Zagreb",
-            "Zagreb - Supermarket Črnomerec",
-            "Zagreb - Supermarket Trešnjevka",
-            "Zagreb - Supermarket Maksimir",
-            "Zagreb - Supermarket Trnje",
-            "Zagreb - Supermarket Podsused",
-            "Zagreb - Supermarket Sesvete",
-            "Zagreb - Supermarket Gajnice",
-            "Zagreb - Supermarket Jarun",
-            "Zagreb - Supermarket Vrbani",
-            "Zagreb - Supermarket Sopot",
-            "Zagreb - Supermarket Kustošija",
-            "Zagreb - Supermarket Bukovac",
-            "Zagreb - Supermarket Špansko",
-            "Zagreb - Supermarket Prečko",
-            "Zagreb - Supermarket Knežija",
-            "Zagreb - Supermarket Siget",
-            "Zagreb - Supermarket Sloboština",
-            "Zagreb - Supermarket Remetinec",
-            "Zagreb - Supermarket Blato",
-            "Zagreb - Supermarket Središće",
-            "Zagreb - Supermarket Jelkovec",
-            
-            # Split locations
-            "Split - Supermarket Vukovarska 12",
-            "Split - Supermarket Brda",
-            "Split - Supermarket Mejaši",
-            "Split - Supermarket Pazdigrad",
-            "Split - Supermarket Plokite",
-            "Split - Supermarket Žnjan",
-            "Split - Supermarket Trstenik",
-            "Split - Supermarket Kman",
-            "Split - Supermarket Lokve",
-            "Split - Supermarket Manuš",
-            "Split - Supermarket Ravne Njive",
-            "Split - Supermarket Sirobuja",
-            "Split - Supermarket Spinut",
-            "Split - Supermarket Sućidar",
-            "Split - Supermarket Visoka",
-            
-            # Rijeka locations
-            "Rijeka - Supermarket Korzo 23",
-            "Rijeka - Supermarket Trsat",
-            "Rijeka - Supermarket Pećine",
-            "Rijeka - Supermarket Potok",
-            "Rijeka - Supermarket Škurinje",
-            "Rijeka - Supermarket Drenova",
-            "Rijeka - Supermarket Sušak",
-            "Rijeka - Supermarket Krimeja",
-            "Rijeka - Supermarket Zamet",
-            "Rijeka - Supermarket Kantrida",
-            
-            # Osijek locations
-            "Osijek - Supermarket Europske Avenije 78",
-            "Osijek - Supermarket Tvrđa",
-            "Osijek - Supermarket Gornji Grad",
-            "Osijek - Supermarket Donji Grad",
-            "Osijek - Supermarket Retfala",
-            "Osijek - Supermarket Jug",
-            "Osijek - Supermarket Vijenac",
-            
-            # Zadar locations
-            "Zadar - Supermarket Poluotok 5",
-            "Zadar - Supermarket Voštarnica",
-            "Zadar - Supermarket Arbanasi",
-            "Zadar - Supermarket Bili Brig",
-            "Zadar - Supermarket Stanovi",
-            "Zadar - Supermarket Gaženica",
-            
-            # Pula locations
-            "Pula - Supermarket Istarska 34",
-            "Pula - Supermarket Centar",
-            "Pula - Supermarket Veruda",
-            "Pula - Supermarket Stoja",
-            "Pula - Supermarket Šijana",
-            "Pula - Supermarket Vidikovac",
-            
-            # Karlovac locations
-            "Karlovac - Supermarket Karlovačka 9",
-            "Karlovac - Supermarket Centar",
-            "Karlovac - Supermarket Dubovac",
-            "Karlovac - Supermarket Turanj",
-            
-            # Sisak locations
-            "Sisak - Supermarket Ul. Kralja Tomislava 56",
-            "Sisak - Supermarket Centar",
-            "Sisak - Supermarket Caprag",
-            
-            # Varaždin locations
-            "Varaždin - Supermarket Zagrebačka 12",
-            "Varaždin - Supermarket Centar",
-            "Varaždin - Supermarket Novi Grad",
-            
-            # Šibenik locations
-            "Šibenik - Supermarket Stjepana Radića 45",
-            "Šibenik - Supermarket Centar",
-            "Šibenik - Supermarket Mandalina",
-            
-            # Dubrovnik locations
-            "Dubrovnik - Supermarket Lapadska obala 23",
-            "Dubrovnik - Supermarket Gruž",
-            "Dubrovnik - Supermarket Ploče",
-            
-            # Slavonski Brod
-            "Slavonski Brod - Supermarket Trg pobjede 7",
-            "Slavonski Brod - Supermarket Centar",
-            
-            # Bjelovar
-            "Bjelovar - Supermarket A. Mihanovića 15",
-            
-            # Koprivnica
-            "Koprivnica - Supermarket Hrvatske državnosti 8",
-            
-            # Čakovec
-            "Čakovec - Supermarket Zrinsko Frankopanska 22",
-            
-            # Vinkovci
-            "Vinkovci - Supermarket Duga ulica 34",
-            
-            # Vukovar
-            "Vukovar - Supermarket Vukovarska 56",
-            
-            # Samobor
-            "Samobor - Supermarket Trg kralja Tomislava 9",
-            
-            # Zaprešić
-            "Zaprešić - Supermarket Zagrebačka 45",
-            
-            # Ivanić-Grad
-            "Ivanić-Grad - Supermarket Trg hrvatskih branitelja 3",
-            
-            # Dugo Selo
-            "Dugo Selo - Supermarket Zagrebačka 67",
-            
-            # Jastrebarsko
-            "Jastrebarsko - Supermarket Trg sv. Nikole 8",
-            
-            # Petrinja
-            "Petrinja - Supermarket Strossmayerova 23",
-            
-            # Kutina
-            "Kutina - Supermarket Trg hrvatskih branitelja 12",
-            
-            # Požega
-            "Požega - Supermarket Trg sv. Trojstva 5",
-            
-            # Đakovo
-            "Đakovo - Supermarket Stjepana Radića 78",
-            
-            # Virovitica
-            "Virovitica - Supermarket Trg kralja Tomislava 34",
-            
-            # Križevci
-            "Križevci - Supermarket Trg sv. Florijana 2",
-            
-            # Nova Gradiška
-            "Nova Gradiška - Supermarket Trg kralja Tomislava 11",
-            
-            # Opatija
-            "Opatija - Supermarket Maršala Tita 45",
-            
-            # Crikvenica
-            "Crikvenica - Supermarket Šetalište Vladimira Nazora 12",
-            
-            # Makarska
-            "Makarska - Supermarket Obala kralja Krešimira 9",
-            
-            # Trogir
-            "Trogir - Supermarket Gradska vrata 3",
-            
-            # Kaštela
-            "Kaštela - Supermarket Kaštel Gomilica",
-            "Kaštela - Supermarket Kaštel Sućurac",
-            
-            # Solin
-            "Solin - Supermarket Trg kralja Zvonimira 5",
-            
-            # Sinj
-            "Sinj - Supermarket Alkar",
-            
-            # Imotski
-            "Imotski - Supermarket Centar",
-            
-            # Metković
-            "Metković - Supermarket Trg kralja Tomislava",
-            
-            # Ploče
-            "Ploče - Supermarket Centar",
-            
-            # Omiš
-            "Omiš - Supermarket Ribarska ulica",
-            
-            # Supetar (Brač)
-            "Supetar - Supermarket Obala",
-            
-            # Korčula
-            "Korčula - Supermarket Centar",
-            
-            # Hvar
-            "Hvar - Supermarket Trg sv. Stjepana",
-            
-            # Poreč
-            "Poreč - Supermarket Trg slobode",
-            
-            # Rovinj
-            "Rovinj - Supermarket Centar",
-            
-            # Umag
-            "Umag - Supermarket Trg",
-            
-            # Novigrad
-            "Novigrad - Supermarket Mandrač",
-            
-            # Buzet
-            "Buzet - Supermarket Centar",
-            
-            # Labin
-            "Labin - Supermarket Centar",
-            
-            # Pazin
-            "Pazin - Supermarket Trg",
-            
-            # Buje
-            "Buje - Supermarket Centar",
-            
-            # Vodnjan
-            "Vodnjan - Supermarket Centar",
-            
-            # Cres
-            "Cres - Supermarket Centar",
-            
-            # Krk
-            "Krk - Supermarket Centar",
-            
-            # Rab
-            "Rab - Supermarket Centar",
-            
-            # Mali Lošinj
-            "Mali Lošinj - Supermarket Centar",
-            
-            # Nova Gradiška
-            "Nova Gradiška - Supermarket Centar",
-            
-            # Našice
-            "Našice - Supermarket Centar",
-            
-            # Valpovo
-            "Valpovo - Supermarket Centar",
-            
-            # Beli Manastir
-            "Beli Manastir - Supermarket Centar",
-            
-            # Đurđevac
-            "Đurđevac - Supermarket Centar",
-            
-            # Ludbreg
-            "Ludbreg - Supermarket Centar",
-            
-            # Ivanec
-            "Ivanec - Supermarket Centar",
-            
-            # Lepoglava
-            "Lepoglava - Supermarket Centar",
-            
-            # Krapina
-            "Krapina - Supermarket Centar",
-            
-            # Zabok
-            "Zabok - Supermarket Centar",
-            
-            # Pregrada
-            "Pregrada - Supermarket Centar",
-            
-            # Donja Stubica
-            "Donja Stubica - Supermarket Centar",
-            
-            # Oroslavje
-            "Oroslavje - Supermarket Centar"
-        ]
-        
-    def generate_filenames_for_location(self, location: str, date: datetime) -> List[str]:
-        """Generate possible CSV filenames for a specific location and date"""
-        date_str = date.strftime("%d.%m.%Y")
-        
-        # For Velika Gorica, use the exact pattern from the example
-        if "Velika Gorica" in location:
-            base_name = "SupermarketTrg-Grada-Vukovara-8-Velika-Gorica-10410"
-            times = ['7.00h', '15.00h']
-            c_numbers = [f'C{i}' for i in range(30, 20, -1)]
-            
-            filenames = []
-            for time in times:
-                for c_num in c_numbers[:3]:  # Try first 3 C-numbers
-                    filenames.append(f"{base_name}-{date_str}-{time}-{c_num}.csv")
-            return filenames
-        
-        # For other locations, create a standardized filename
-        # Extract city and store info
-        parts = location.split(' - ')
-        city = parts[0] if len(parts) > 0 else location
-        store = parts[1] if len(parts) > 1 else "Supermarket"
-        
-        # Clean the store name for filename
-        clean_store = re.sub(r'[^\w\s-]', '', store)
-        clean_store = clean_store.replace(' ', '-')
-        clean_store = re.sub(r'-+', '-', clean_store)
-        clean_store = clean_store.strip('-')
-        
-        # Clean city name
-        clean_city = city.replace(' ', '-')
-        clean_city = re.sub(r'[^\w-]', '', clean_city)
-        
-        # Try different filename patterns
-        filenames = []
-        
-        # Pattern 1: Supermarket-City-Date-7.00h-C30.csv
-        filenames.append(f"Supermarket-{clean_city}-{date_str}-7.00h-C30.csv")
-        
-        # Pattern 2: Store-City-Date-7.00h-C30.csv
-        filenames.append(f"{clean_store}-{clean_city}-{date_str}-7.00h-C30.csv")
-        
-        # Pattern 3: City-Store-Date-7.00h-C30.csv
-        filenames.append(f"{clean_city}-{clean_store}-{date_str}-7.00h-C30.csv")
-        
-        return list(set(filenames))
+    # Create Supabase client
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    base_url = "https://zabacfoodoutlet.hr"
+    store_type = "zabac"
     
-    def download_csv(self, filename: str) -> Optional[bytes]:
-        """Download CSV file from Zabac"""
-        current_month = datetime.now().strftime("%Y/%m")
-        previous_month = (datetime.now() - timedelta(days=30)).strftime("%Y/%m")
-        
-        for month_path in [current_month, previous_month]:
-            url = f"{self.base_url}/wp-content/uploads/{month_path}/{filename}"
-            try:
-                response = requests.get(url, timeout=15)
-                if response.status_code == 200:
-                    print(f"    ✓ Downloaded: {filename}")
-                    return response.content
-                elif response.status_code == 404:
-                    continue
-            except:
-                continue
-        
-        return None
+    # Complete Zabac locations
+    locations = [
+        "Velika Gorica - Supermarket Trg Grada Vukovara 8",
+        "Zagreb - Supermarket Ilica 123",
+        "Zagreb - Supermarket Savska 45",
+        "Zagreb - Supermarket Dubrava",
+        "Zagreb - Supermarket Novi Zagreb",
+        "Zagreb - Supermarket Črnomerec",
+        "Zagreb - Supermarket Trešnjevka",
+        "Zagreb - Supermarket Maksimir",
+        "Zagreb - Supermarket Trnje",
+        "Zagreb - Supermarket Podsused",
+        "Zagreb - Supermarket Sesvete",
+        "Zagreb - Supermarket Gajnice",
+        "Zagreb - Supermarket Jarun",
+        "Zagreb - Supermarket Vrbani",
+        "Zagreb - Supermarket Sopot",
+        "Zagreb - Supermarket Kustošija",
+        "Zagreb - Supermarket Bukovac",
+        "Zagreb - Supermarket Špansko",
+        "Zagreb - Supermarket Prečko",
+        "Zagreb - Supermarket Knežija",
+        "Zagreb - Supermarket Siget",
+        "Zagreb - Supermarket Sloboština",
+        "Zagreb - Supermarket Remetinec",
+        "Zagreb - Supermarket Blato",
+        "Zagreb - Supermarket Središće",
+        "Zagreb - Supermarket Jelkovec",
+        "Split - Supermarket Vukovarska 12",
+        "Split - Supermarket Brda",
+        "Split - Supermarket Mejaši",
+        "Split - Supermarket Pazdigrad",
+        "Split - Supermarket Plokite",
+        "Split - Supermarket Žnjan",
+        "Split - Supermarket Trstenik",
+        "Split - Supermarket Kman",
+        "Split - Supermarket Lokve",
+        "Split - Supermarket Manuš",
+        "Split - Supermarket Ravne Njive",
+        "Split - Supermarket Sirobuja",
+        "Split - Supermarket Spinut",
+        "Split - Supermarket Sućidar",
+        "Split - Supermarket Visoka",
+        "Rijeka - Supermarket Korzo 23",
+        "Rijeka - Supermarket Trsat",
+        "Rijeka - Supermarket Pećine",
+        "Rijeka - Supermarket Potok",
+        "Rijeka - Supermarket Škurinje",
+        "Rijeka - Supermarket Drenova",
+        "Rijeka - Supermarket Sušak",
+        "Rijeka - Supermarket Krimeja",
+        "Rijeka - Supermarket Zamet",
+        "Rijeka - Supermarket Kantrida",
+        "Osijek - Supermarket Europske Avenije 78",
+        "Osijek - Supermarket Tvrđa",
+        "Osijek - Supermarket Gornji Grad",
+        "Osijek - Supermarket Donji Grad",
+        "Osijek - Supermarket Retfala",
+        "Osijek - Supermarket Jug",
+        "Osijek - Supermarket Vijenac",
+        "Zadar - Supermarket Poluotok 5",
+        "Zadar - Supermarket Voštarnica",
+        "Zadar - Supermarket Arbanasi",
+        "Zadar - Supermarket Bili Brig",
+        "Zadar - Supermarket Stanovi",
+        "Zadar - Supermarket Gaženica",
+        "Pula - Supermarket Istarska 34",
+        "Pula - Supermarket Centar",
+        "Pula - Supermarket Veruda",
+        "Pula - Supermarket Stoja",
+        "Pula - Supermarket Šijana",
+        "Pula - Supermarket Vidikovac",
+        "Karlovac - Supermarket Karlovačka 9",
+        "Sisak - Supermarket Ul. Kralja Tomislava 56",
+        "Varaždin - Supermarket Zagrebačka 12",
+        "Šibenik - Supermarket Stjepana Radića 45",
+        "Dubrovnik - Supermarket Lapadska obala 23",
+        "Slavonski Brod - Supermarket Trg pobjede 7",
+        "Bjelovar - Supermarket A. Mihanovića 15",
+        "Koprivnica - Supermarket Hrvatske državnosti 8",
+        "Čakovec - Supermarket Zrinsko Frankopanska 22",
+        "Vinkovci - Supermarket Duga ulica 34",
+        "Vukovar - Supermarket Vukovarska 56",
+        "Samobor - Supermarket Trg kralja Tomislava 9",
+        "Zaprešić - Supermarket Zagrebačka 45",
+        "Opatija - Supermarket Maršala Tita 45",
+        "Crikvenica - Supermarket Šetalište Vladimira Nazora 12",
+        "Makarska - Supermarket Obala kralja Krešimira 9",
+        "Trogir - Supermarket Gradska vrata 3",
+        "Kaštela - Supermarket Kaštel Gomilica",
+        "Solin - Supermarket Trg kralja Zvonimira 5",
+    ]
     
-    def parse_csv_content(self, content: bytes, location: str, filename: str, date: datetime) -> List[Dict]:
-        """Parse CSV content into records for Supabase"""
-        try:
-            # Try different encodings
-            for encoding in ['utf-8', 'iso-8859-1', 'cp1250', 'latin1']:
+    # Generate dates for last 3 days
+    dates = [(datetime.now() - timedelta(days=i)).strftime("%d.%m.%Y") for i in range(3)]
+    log(f"📅 Processing dates: {', '.join(dates)}")
+    log(f"📍 Total locations: {len(locations)}")
+    
+    total_processed = 0
+    job["total"] = len(locations) * len(dates)  # Approximate total
+    
+    for idx, location in enumerate(locations, 1):
+        log(f"📍 [{idx}/{len(locations)}] {location[:50]}...")
+        job["current_file"] = location[:60]
+        
+        for date_str in dates:
+            # Generate filename
+            if "Velika Gorica" in location:
+                base_name = "SupermarketTrg-Grada-Vukovara-8-Velika-Gorica-10410"
+                filename = f"{base_name}-{date_str}-7.00h-C30.csv"
+            else:
+                city = location.split(' - ')[0] if ' - ' in location else location
+                clean_city = city.replace(' ', '-')
+                clean_city = re.sub(r'[^\w-]', '', clean_city)
+                filename = f"Supermarket-{clean_city}-{date_str}-7.00h-C30.csv"
+            
+            # Try to download
+            current_month = datetime.now().strftime("%Y/%m")
+            previous_month = (datetime.now() - timedelta(days=30)).strftime("%Y/%m")
+            
+            downloaded = False
+            for month_path in [current_month, previous_month]:
+                url = f"{base_url}/wp-content/uploads/{month_path}/{filename}"
                 try:
-                    df = pd.read_csv(
-                        pd.io.common.BytesIO(content), 
-                        encoding=encoding,
-                        sep=',',
-                        on_bad_lines='skip'
-                    )
-                    if not df.empty:
-                        break
+                    r = requests.get(url, timeout=15)
+                    if r.status_code == 200:
+                        log(f"  ✓ Downloaded: {filename}")
+                        
+                        # Parse CSV
+                        try:
+                            for encoding in ['utf-8', 'iso-8859-1', 'cp1250', 'latin1']:
+                                try:
+                                    df = pd.read_csv(
+                                        io.BytesIO(r.content),
+                                        encoding=encoding,
+                                        sep=',',
+                                        on_bad_lines='skip'
+                                    )
+                                    if not df.empty:
+                                        break
+                                except:
+                                    continue
+                            
+                            if df is not None and not df.empty:
+                                # Prepare records
+                                records = []
+                                for _, row in df.iterrows():
+                                    if pd.notna(row.get('Barcode')) and pd.notna(row.get('MPC')):
+                                        barcode = str(row.get('Barcode', '')).strip()
+                                        if barcode and barcode != 'nan':
+                                            records.append({
+                                                "barcode": barcode,
+                                                "name": str(row.get('Naziv artikla', ''))[:300],
+                                                "brand": str(row.get('Marka', ''))[:200] if pd.notna(row.get('Marka')) else None,
+                                                "category": str(row.get('Naziv grupe artikala', ''))[:200] if pd.notna(row.get('Naziv grupe artikala')) else None,
+                                                "unit": str(row.get('Gramaža', ''))[:50] if pd.notna(row.get('Gramaža')) else None,
+                                                "regular_price": float(row.get('MPC', 0)) if pd.notna(row.get('MPC')) else None,
+                                                "current_price": float(row.get('MPC', 0)) if pd.notna(row.get('MPC')) else None,
+                                            })
+                                
+                                if records:
+                                    df_clean = pd.DataFrame(records)
+                                    df_clean['store'] = store_type
+                                    df_clean['location'] = location
+                                    df_clean['is_on_sale'] = False
+                                    df_clean['sale_price'] = None
+                                    push_to_supabase(df_clean, store_type)
+                                    total_processed += len(records)
+                                    log(f"    ✓ Processed {len(records)} products")
+                                
+                                downloaded = True
+                                break
+                        except Exception as e:
+                            log(f"    ✗ Parse error: {e}")
                 except:
                     continue
-            else:
-                print(f"    ✗ Failed to parse CSV")
-                return []
             
-            # Prepare records for insertion
-            records = []
-            for _, row in df.iterrows():
-                record = {
-                    'store_type': self.store_type,
-                    'location': location,
-                    'product_name': str(row.get('Naziv artikla', ''))[:255] if pd.notna(row.get('Naziv artikla')) else '',
-                    'price': float(row.get('MPC', 0)) if pd.notna(row.get('MPC')) else None,
-                    'category': str(row.get('Naziv grupe artikala', ''))[:100] if pd.notna(row.get('Naziv grupe artikala')) else '',
-                    'barcode': str(row.get('Barcode', ''))[:50] if pd.notna(row.get('Barcode')) else '',
-                    'product_code': str(row.get('Šifra artikla', ''))[:50] if pd.notna(row.get('Šifra artikla')) else '',
-                    'brand': str(row.get('Marka', ''))[:100] if pd.notna(row.get('Marka')) else '',
-                    'unit': str(row.get('Gramaža', ''))[:50] if pd.notna(row.get('Gramaža')) else '',
-                    'imported_at': datetime.now().isoformat(),
-                    'source_file': filename,
-                    'download_date': date.date().isoformat()
-                }
-                
-                # Add optional fields if they exist in the table
-                if pd.notna(row.get('PDV')):
-                    try:
-                        record['vat_rate'] = float(row.get('PDV'))
-                    except:
-                        pass
-                
-                if pd.notna(row.get('Najniža cijena u posljednjih 30 dana')):
-                    try:
-                        record['lowest_price_30d'] = float(row.get('Najniža cijena u posljednjih 30 dana'))
-                    except:
-                        pass
-                
-                records.append(record)
-            
-            print(f"    ✓ Parsed {len(records)} records")
-            return records
-            
-        except Exception as e:
-            print(f"    ✗ Error parsing CSV: {e}")
-            return []
-    
-    def upload_to_supabase(self, records: List[Dict]) -> bool:
-        """Upload records to Supabase"""
-        if not records:
-            return False
-        
-        try:
-            table_name = 'store_prices'
-            batch_size = 500
-            total_uploaded = 0
-            
-            for i in range(0, len(records), batch_size):
-                batch = records[i:i+batch_size]
-                
-                try:
-                    # Try to insert
-                    self.supabase.table(table_name).insert(batch).execute()
-                    total_uploaded += len(batch)
-                except Exception as e:
-                    # If duplicate key, try upsert for each record
-                    if 'duplicate key' in str(e).lower() or 'unique constraint' in str(e).lower():
-                        for record in batch:
-                            try:
-                                self.supabase.table(table_name).upsert(
-                                    record,
-                                    on_conflict='store_type,location,product_code,download_date'
-                                ).execute()
-                                total_uploaded += 1
-                            except Exception as inner_e:
-                                print(f"      ⚠ Failed to upsert: {inner_e}")
-                    else:
-                        print(f"      ⚠ Batch insert failed: {e}")
-                        # Try individual inserts
-                        for record in batch:
-                            try:
-                                self.supabase.table(table_name).insert(record).execute()
-                                total_uploaded += 1
-                            except:
-                                pass
-            
-            print(f"    ✓ Uploaded {total_uploaded} records")
-            return total_uploaded > 0
-            
-        except Exception as e:
-            print(f"    ✗ Upload failed: {e}")
-            return False
-    
-    def process_last_3_days(self, test_mode: bool = False) -> Dict:
-        """Process all locations for the last 3 days"""
-        print("\n" + "="*70)
-        print("🏪 ZABAC - Complete Price List Downloader")
-        print("="*70)
-        
-        # Generate dates for last 3 days
-        dates = [datetime.now() - timedelta(days=i) for i in range(3)]
-        print(f"📅 Processing dates: {', '.join([d.strftime('%Y-%m-%d') for d in dates])}")
-        print(f"📍 Total locations: {len(self.locations)}")
-        
-        stats = {
-            'store': 'zabac',
-            'total_locations': len(self.locations),
-            'total_files_attempted': 0,
-            'total_files_downloaded': 0,
-            'total_files_uploaded': 0,
-            'total_records_uploaded': 0,
-            'processed_locations': []
-        }
-        
-        for idx, location in enumerate(self.locations, 1):
-            if test_mode and idx > 10:
-                print(f"\n⏸ Test mode: stopping after 10 locations")
+            if downloaded:
+                job["processed"] += 1
                 break
-                
-            print(f"\n📍 [{idx}/{len(self.locations)}] {location}")
-            location_stats = {
-                'location': location,
-                'dates': []
-            }
-            
-            for date in dates:
-                print(f"  📅 Date: {date.strftime('%Y-%m-%d')}")
-                
-                # Generate filenames for this location and date
-                filenames = self.generate_filenames_for_location(location, date)
-                
-                if test_mode:
-                    filenames = filenames[:1]
-                
-                date_has_data = False
-                
-                for filename in filenames:
-                    stats['total_files_attempted'] += 1
-                    
-                    # Download
-                    content = self.download_csv(filename)
-                    if not content:
-                        continue
-                    
-                    stats['total_files_downloaded'] += 1
-                    date_has_data = True
-                    
-                    # Parse
-                    records = self.parse_csv_content(content, location, filename, date)
-                    if not records:
-                        continue
-                    
-                    # Upload
-                    if self.upload_to_supabase(records):
-                        stats['total_files_uploaded'] += 1
-                        stats['total_records_uploaded'] += len(records)
-                    
-                    time.sleep(0.3)  # Be respectful to the server
-                
-                location_stats['dates'].append({
-                    'date': date.strftime('%Y-%m-%d'),
-                    'has_data': date_has_data
-                })
-            
-            stats['processed_locations'].append(location_stats)
-        
-        # Print summary
-        print("\n" + "="*70)
-        print("📊 ZABAC DOWNLOAD SUMMARY")
-        print("="*70)
-        print(f"  Locations processed: {len(stats['processed_locations'])}/{stats['total_locations']}")
-        print(f"  Files attempted: {stats['total_files_attempted']}")
-        print(f"  Files downloaded: {stats['total_files_downloaded']}")
-        print(f"  Files uploaded: {stats['total_files_uploaded']}")
-        print(f"  Total records uploaded: {stats['total_records_uploaded']:,}")
-        print("="*70)
-        
-        return stats
-
-
-# Function to run Zabac downloader
-def run_zabac(supabase_url: str, supabase_key: str, test_mode: bool = False) -> Dict:
-    """Run Zabac downloader - call this from your main script"""
-    downloader = ZabacDownloader(supabase_url, supabase_key)
-    return downloader.process_last_3_days(test_mode=test_mode)
-
-
-# Example usage
-if __name__ == "__main__":
-    import os
-    from dotenv import load_dotenv
+            else:
+                time.sleep(0.3)
     
-    load_dotenv()
-    
-    SUPABASE_URL = os.getenv('SUPABASE_URL', 'your_supabase_url')
-    SUPABASE_KEY = os.getenv('SUPABASE_KEY', 'your_supabase_key')
-    
-    # Run with test_mode=True to test with first 10 locations
-    results = run_zabac(SUPABASE_URL, SUPABASE_KEY, test_mode=False)
-    
-    print(f"\n✅ Zabac download complete!")
+    log(f"✅ Zabac completed: {total_processed} products processed")
+
 
 STORE_DOWNLOADERS = {
     "lidl":     download_lidl,
@@ -1364,7 +982,7 @@ STORE_DOWNLOADERS = {
     "zabac":    download_zabac,
 }
 
-ALL_STORES = ["lidl", "tommy", "spar", "konzum", "kaufland", "plodine"]
+ALL_STORES = ["lidl", "tommy", "spar", "konzum", "kaufland", "plodine", "studenac", "zabac"]
 
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 def run_cleanup():
