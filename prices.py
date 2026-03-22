@@ -320,119 +320,114 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data from spiza.tommy.hr API"""
-    log("🟠 TOMMY — fetching via spiza.tommy.hr API...")
-    api_headers = {**HEADERS, "Accept": "application/ld+json"}
+    """Download Tommy price data directly as CSV"""
+    log("🟠 TOMMY — downloading CSV from API...")
+    
+    api_headers = {
+        **HEADERS,
+        "Accept": "text/csv",  # Request CSV format directly
+    }
     
     for delta in [0, 1]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
-        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={d}"
+        
+        # Request CSV format
+        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables.csv?date={d}"
         
         try:
-            r = requests.get(url, headers=api_headers, timeout=30)
+            log(f"  Fetching: {url}")
+            r = requests.get(url, headers=api_headers, timeout=60)
             r.raise_for_status()
-            data = r.json()
-            members = data.get("hydra:member", [])
             
-            if not members:
-                log(f"  No data for {d}, trying previous day...")
+            # Parse CSV content
+            csv_content = r.content
+            
+            # Check if we got actual data (not HTML error page)
+            if b"<!DOCTYPE" in csv_content[:100]:
+                log(f"  ⚠️ Received HTML instead of CSV for {d}")
                 continue
-                
-            log(f"  Found {len(members)} entries for {d}")
             
-            # Process all members to collect price data
-            all_rows = []
-            total_members = len(members)
+            # Parse CSV with pandas
+            df = pd.read_csv(io.BytesIO(csv_content), encoding='utf-8')
+            log(f"  ✓ Downloaded {len(df)} rows for {d}")
             
-            for idx, member in enumerate(members):
-                job["current_file"] = f"Processing item {idx+1}/{total_members}"
-                
-                # Fetch full details for each item
-                detail_url = f"https://spiza.tommy.hr{member['@id']}"
-                try:
-                    r2 = requests.get(detail_url, headers=api_headers, timeout=30)
-                    r2.raise_for_status()
-                    detail = r2.json()
-                    
-                    # Extract price information
-                    row = {
-                        'name': detail.get('name', ''),
-                        'brand': detail.get('brand', ''),
-                        'barcode': detail.get('barcode', ''),
-                        'regular_price': None,
-                        'sale_price': None,
-                        'category': detail.get('category', ''),
-                        'quantity': detail.get('quantity', ''),
-                        'unit': detail.get('unit', ''),
-                        'location': detail.get('store', {}).get('name', '') if isinstance(detail.get('store'), dict) else '',
-                    }
-                    
-                    # Extract prices - Tommy uses different fields
-                    # Check for MPC_POSEBNO (sale price) vs regular MPC
-                    mpc = detail.get('mpc', {})
-                    if isinstance(mpc, dict):
-                        # Try to find sale price first
-                        if 'posebno' in mpc and mpc['posebno']:
-                            row['sale_price'] = float(mpc['posebno']) if mpc['posebno'] else None
-                            row['regular_price'] = float(mpc['redovno']) if mpc.get('redovno') else None
-                        else:
-                            row['regular_price'] = float(mpc.get('redovno') or mpc.get('value') or 0) if mpc.get('redovno') or mpc.get('value') else None
-                    
-                    # Alternative price field structure
-                    if not row['sale_price'] and not row['regular_price']:
-                        row['regular_price'] = detail.get('price')
-                        row['sale_price'] = detail.get('salePrice') or detail.get('specialPrice')
-                    
-                    all_rows.append(row)
-                    
-                    # Log progress occasionally
-                    if (idx + 1) % 50 == 0:
-                        log(f"  Processed {idx+1}/{total_members} items")
-                        
-                except Exception as e:
-                    log(f"  ⚠️ Failed to fetch detail for {member.get('@id', 'unknown')}: {e}")
-                    continue
-            
-            if not all_rows:
-                log("  No valid price data extracted")
+            if len(df) == 0:
+                log(f"  ⚠️ Empty CSV for {d}")
                 continue
-                
-            # Create DataFrame from collected data
-            df = pd.DataFrame(all_rows)
             
-            # Clean up the data
+            # Standardize column names
+            df.columns = [c.lower().strip() for c in df.columns]
+            
+            # Map columns to expected format
+            # Common Tommy CSV column names
+            column_mapping = {
+                'barkod': 'barcode',
+                'ean': 'barcode',
+                'naziv': 'name',
+                'marka': 'brand',
+                'mpc': 'regular_price',
+                'akcijska cijena': 'sale_price',
+                'posebna cijena': 'sale_price',
+                'količina': 'quantity',
+                'jedinica mjere': 'unit',
+                'kategorija': 'category',
+            }
+            
+            for old_name, new_name in column_mapping.items():
+                if old_name in df.columns and new_name not in df.columns:
+                    df = df.rename(columns={old_name: new_name})
+            
+            # Use fuzzy rename for any remaining columns
+            df = fuzzy_rename(df)
+            
+            # Ensure required columns exist
+            if 'barcode' not in df.columns:
+                log(f"  ⚠️ No barcode column. Columns: {list(df.columns)}")
+                continue
+            
+            # Clean barcodes
             df['barcode'] = df['barcode'].astype(str).str.strip().str.replace(r'\s+', '', regex=True)
             df = df[df['barcode'].notna() & (df['barcode'] != '') & (df['barcode'] != 'nan')]
             
-            # Convert price columns to numeric
+            # Convert price columns
             for col in ['regular_price', 'sale_price']:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df[col] = pd.to_numeric(
+                        df[col].astype(str)
+                        .str.replace(',', '.')
+                        .str.replace(r'[^\d.-]', '', regex=True),
+                        errors='coerce'
+                    )
             
-            # Set current price (sale price takes precedence)
-            df['current_price'] = df['sale_price'].combine_first(df['regular_price'])
-            df['is_on_sale'] = df['sale_price'].notna() & (df['sale_price'] > 0)
+            # Set current price
+            if 'current_price' not in df.columns:
+                if 'sale_price' in df.columns and 'regular_price' in df.columns:
+                    df['current_price'] = df['sale_price'].combine_first(df['regular_price'])
+                else:
+                    df['current_price'] = df.get('regular_price', df.get('price', None))
+            
+            df['is_on_sale'] = df.get('sale_price', pd.Series([None])).notna() & (df.get('sale_price', 0) > 0)
             df['store'] = 'tommy'
+            df['location'] = 'Tommy'
             
-            # Set location from store name or default
-            df['location'] = df['location'].fillna('Tommy Store')
-            
-            # Push to Supabase using existing function
+            # Push to Supabase
             if len(df) > 0:
-                log(f"  ✅ Extracted {len(df)} valid price records")
                 push_to_supabase(df, 'tommy')
-                return  # Success, exit the function
+                return  # Success
             else:
                 log(f"  ⚠️ No valid records after filtering")
                 
         except requests.exceptions.RequestException as e:
-            log(f"  Error fetching data for {d}: {e}")
+            log(f"  Error fetching CSV for {d}: {e}")
             continue
         except Exception as e:
-            log(f"  Unexpected error for {d}: {e}")
+            log(f"  Error processing CSV for {d}: {e}")
+            import traceback
+            log(traceback.format_exc())
             continue
     
     raise ValueError("Tommy: no data found for today or yesterday")
+    
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
     today_str = date.today().strftime("%Y%m%d")
