@@ -361,66 +361,62 @@ def download_tommy():
     log(f"  Found {len(csv_urls)} CSV files")
     job["total"] += len(csv_urls)
 
-    def _download_tommy_file(url):
-        filename = url.split("/")[-1].split("?")[0]
-        job["current_file"] = filename[:80]
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=60)
-            r.raise_for_status()
+   def download_tommy():
+    log("🟠 TOMMY — fetching via spiza.tommy.hr API...")
 
-            df = None
-            for enc in ["utf-8-sig", "utf-8", "cp1250", "latin-1"]:
-                try:
-                    df = pd.read_csv(
-                        io.BytesIO(r.content),
-                        encoding=enc,
-                        sep=",",
-                        dtype=str,
-                        skipinitialspace=True,
-                    )
-                    break
-                except Exception:
-                    continue
+    today_str = date.today().strftime("%Y-%m-%d")
 
-            if df is None:
-                raise ValueError("Could not decode CSV")
+    # Sylius/Hydra API — needs Accept: application/json or it returns Swagger UI HTML
+    api_headers = {
+        **HEADERS,
+        "Accept": "application/json",
+    }
 
-            df.columns = [c.strip() for c in df.columns]
-            df = fuzzy_rename(df)
+    # Step 1: get file list
+    url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={today_str}"
+    log(f"  Fetching: {url}")
+    r = requests.get(url, headers=api_headers, timeout=30)
+    r.raise_for_status()
 
-            for col in ["regular_price", "sale_price", "lowest_30d_price", "anchor_price"]:
-                if col not in df.columns:
-                    df[col] = None
-                else:
-                    df[col] = pd.to_numeric(
-                        df[col].astype(str).str.strip()
-                            .str.replace(",", ".", regex=False)
-                            .str.replace(r"[^\d.]", "", regex=True),
-                        errors="coerce"
-                    )
+    data = r.json()
+    log(f"  Response keys: {list(data.keys())}")
 
-            if "barcode" not in df.columns:
-                log(f"  ❌ {filename}: no barcode. Cols: {list(df.columns)[:6]}")
-                job["errors"].append(f"{filename}: no barcode column")
-                return
+    members = data.get("hydra:member", data.get("member", []))
+    if not members:
+        # Try yesterday if today's not published yet
+        yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
+        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={yesterday}"
+        log(f"  No data for today, trying yesterday: {url}")
+        r = requests.get(url, headers=api_headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        members = data.get("hydra:member", data.get("member", []))
 
-            df["barcode"] = df["barcode"].astype(str).str.strip().str.replace(r"\s+", "", regex=True)
-            df = df[df["barcode"].notna() & (df["barcode"] != "") & (df["barcode"] != "nan")]
-            df["current_price"] = df["sale_price"].combine_first(df["regular_price"])
-            df["is_on_sale"]    = df["sale_price"].notna() & (df["sale_price"] > 0)
-            df["store"]         = "tommy"
-            df["location"]      = location_from_filename(filename)
+    if not members:
+        raise ValueError(f"Tommy API returned no members. Keys: {list(data.keys())}, preview: {str(data)[:300]}")
 
-            push_to_supabase(df, "tommy")
-            job["processed"] += 1
-            log(f"  ✓ {filename}: {len(df)} rows")
+    log(f"  Found {len(members)} entries. First entry keys: {list(members[0].keys()) if members else 'N/A'}")
+    log(f"  First entry preview: {str(members[0])[:300]}")
 
-        except Exception as e:
-            log(f"  ❌ {filename}: {e}")
-            job["errors"].append(f"{filename}: {e}")
+    # Extract CSV URLs — field name TBD from actual response
+    csv_urls = []
+    for item in members:
+        # Try common field names
+        url = (item.get("filePath") or item.get("file") or item.get("url") or
+               item.get("csvFile") or item.get("path") or item.get("downloadUrl") or "")
+        if url and url.lower().endswith(".csv"):
+            if not url.startswith("http"):
+                url = "https://spiza.tommy.hr" + url
+            csv_urls.append(url)
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(_download_tommy_file, url) for url in csv_urls]
+    log(f"  Found {len(csv_urls)} CSV URLs")
+    if not csv_urls:
+        log(f"  ⚠️  No CSV URLs found. Full first item: {members[0]}")
+        return
+
+    job["total"] += len(csv_urls)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_download_one_csv, url, "tommy"): url for url in csv_urls}
         for future in as_completed(futures):
             future.result()
 
