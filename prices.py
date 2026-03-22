@@ -323,37 +323,51 @@ def download_lidl():
 def download_tommy():
     log("🟠 TOMMY — fetching file list from objava-cjenika...")
 
-    # Tommy publishes a page listing all store CSV files
-    listing_url = "https://www.tommy.hr/objava-cjenika"
-    r = requests.get(listing_url, headers=HEADERS, timeout=30)
+    r = requests.get("https://www.tommy.hr/objava-cjenika", headers=HEADERS, timeout=30)
     r.raise_for_status()
+    html = r.text
 
-    # Extract all .csv links from the page
-    csv_links = re.findall(r'href="([^"]+\.csv)"', r.text)
+    # Tommy uses download links — try multiple patterns
+    import re as _re
+    patterns = [
+        r'href="([^"]*\.csv[^"]*)"',           # standard href
+        r"href='([^']*\.csv[^']*)'",            # single-quote href
+        r'"url"\s*:\s*"([^"]*\.csv[^"]*)"',     # JSON url field
+        r'data-href="([^"]*\.csv[^"]*)"',        # data-href
+        r'action="([^"]*\.csv[^"]*)"',           # form action
+        r'(https?://[^\s"\'<>]+\.csv)',          # bare URL
+    ]
+
+    csv_links = []
+    for pat in patterns:
+        found = _re.findall(pat, html, _re.IGNORECASE)
+        csv_links.extend(found)
+
+    # Also look for fileadmin paths (Tommy uses TYPO3 CMS)
+    fileadmin = _re.findall(r'(/fileadmin/[^\s"\'<>]+)', html)
+    csv_links.extend([l for l in fileadmin if l.lower().endswith('.csv')])
+
+    # Deduplicate
+    csv_links = list(dict.fromkeys(csv_links))
+
     if not csv_links:
-        # Fallback: try the static ZIP
-        log("  No CSV links found on page, trying static ZIP fallback...")
-        r2 = requests.get("https://www.tommy.hr/fileadmin/user_upload/cjenik.zip",
-                          headers=HEADERS, timeout=120)
-        r2.raise_for_status()
-        log(f"  ✓ ZIP {len(r2.content)//1024} KB")
-        process_zip_bytes(r2.content, "tommy", "csv")
-        return
+        # Log first 2000 chars of HTML so we can see the structure
+        log(f"  ⚠️  No CSV links found. HTML preview:")
+        log(f"  {html[:2000]}")
+        raise ValueError("Tommy: no CSV links found on objava-cjenika page")
 
-    # Make URLs absolute
     base = "https://www.tommy.hr"
     csv_urls = [l if l.startswith("http") else base + l for l in csv_links]
     log(f"  Found {len(csv_urls)} CSV files")
     job["total"] += len(csv_urls)
 
     def _download_tommy_file(url):
-        filename = url.split("/")[-1]
+        filename = url.split("/")[-1].split("?")[0]
         job["current_file"] = filename[:80]
         try:
             r = requests.get(url, headers=HEADERS, timeout=60)
             r.raise_for_status()
 
-            # Tommy: comma-separated, Croatian decimal comma, UTF-8 or cp1250
             df = None
             for enc in ["utf-8-sig", "utf-8", "cp1250", "latin-1"]:
                 try:
