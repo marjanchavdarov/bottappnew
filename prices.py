@@ -884,11 +884,11 @@ def download_zabac():
     log(f"📍 Total locations: {len(locations)}")
     
     total_processed = 0
-    job["total"] = len(locations) * len(dates)  # Approximate total
+    files_processed = 0
+    job["total"] = len(locations) * len(dates)  # Total possible files
     
     for idx, location in enumerate(locations, 1):
         log(f"📍 [{idx}/{len(locations)}] {location[:50]}...")
-        job["current_file"] = location[:60]
         
         for date_str in dates:
             # Generate filename
@@ -901,6 +901,8 @@ def download_zabac():
                 clean_city = re.sub(r'[^\w-]', '', clean_city)
                 filename = f"Supermarket-{clean_city}-{date_str}-7.00h-C30.csv"
             
+            job["current_file"] = f"{location[:30]} - {date_str}"
+            
             # Try to download
             current_month = datetime.now().strftime("%Y/%m")
             previous_month = (datetime.now() - timedelta(days=30)).strftime("%Y/%m")
@@ -911,7 +913,7 @@ def download_zabac():
                 try:
                     r = requests.get(url, timeout=15)
                     if r.status_code == 200:
-                        log(f"  ✓ Downloaded: {filename}")
+                        log(f"  ✓ [{date_str}] Downloaded: {filename}")
                         
                         # Parse CSV
                         try:
@@ -954,23 +956,26 @@ def download_zabac():
                                     push_to_supabase(df_clean, store_type)
                                     total_processed += len(records)
                                     log(f"    ✓ Processed {len(records)} products")
+                                    files_processed += 1
+                                    job["processed"] = files_processed
                                 
                                 downloaded = True
                                 break
                         except Exception as e:
                             log(f"    ✗ Parse error: {e}")
-                except:
+                except Exception as e:
                     continue
             
-            if downloaded:
-                job["processed"] += 1
-                break
-            else:
-                time.sleep(0.3)
+            if not downloaded:
+                log(f"  ✗ [{date_str}] No file found")
+            
+            time.sleep(0.2)  # Small delay between requests
+        
+        # Update progress
+        job["processed"] = files_processed
     
-    log(f"✅ Zabac completed: {total_processed} products processed")
-
-
+    log(f"✅ Zabac completed: {total_processed} products from {files_processed} files")
+    
 STORE_DOWNLOADERS = {
     "lidl":     download_lidl,
     "tommy":    download_tommy,
