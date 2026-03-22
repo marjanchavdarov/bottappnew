@@ -320,80 +320,84 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data for all stores"""
-    log("🟠 TOMMY — fetching price data from all stores...")
+    """Download Tommy price data - correct implementation based on API docs"""
+    log("🟠 TOMMY — fetching price data from API...")
     
-    api_headers = {**HEADERS, "Accept": "application/json"}
-    all_products = []
+    # Step 1: Get list of available CSV files
+    headers = {**HEADERS, "Accept": "application/ld+json"}  # JSON-LD format
     
     for delta in [0, 1, 2]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
-        
-        # First, get list of stores
-        stores_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}&itemsPerPage=100"
+        files_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}&itemsPerPage=100"
         
         try:
-            r = requests.get(stores_url, headers=api_headers, timeout=30)
+            log(f"  Fetching file list for {d}...")
+            r = requests.get(files_url, headers=headers, timeout=30)
             r.raise_for_status()
             data = r.json()
-            stores = data.get("hydra:member", [])
             
-            if not stores:
-                log(f"  No stores found for {d}")
+            # Get the list of files
+            files = data.get("hydra:member", [])
+            if not files:
+                log(f"  No files found for {d}")
                 continue
                 
-            log(f"  Found {len(stores)} stores for {d}")
-            job["total"] += len(stores)
+            log(f"  Found {len(files)} CSV files")
+            job["total"] += len(files)
             
-            # Download price data for each store
-            for idx, store in enumerate(stores):
-                # Get the store identifier from the @id field
-                store_id = store.get("@id", "").split("/")[-1]
-                store_name = store.get("filename", f"store_{idx}")
+            all_dfs = []
+            
+            # Step 2: Download each CSV file
+            for idx, file_info in enumerate(files):
+                # Get the filename (store identifier)
+                filename = file_info.get("filename")
+                if not filename:
+                    continue
+                    
+                job["current_file"] = f"Downloading {filename} ({idx+1}/{len(files)})"
                 
-                job["current_file"] = f"Store {idx+1}/{len(stores)}: {store_name}"
+                # Download the CSV
+                csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{filename}"
+                log(f"    Downloading: {filename}")
                 
-                # Try different URL patterns to get the price CSV
-                csv_urls = [
-                    f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{store_id}.csv?date={d}",
-                    f"https://spiza.tommy.hr{store.get('@id')}.csv?date={d}",
-                ]
-                
-                for csv_url in csv_urls:
-                    try:
-                        log(f"    Fetching: {csv_url[:80]}...")
-                        r2 = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
+                try:
+                    r_csv = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
+                    
+                    if r_csv.status_code == 200 and not r_csv.text.startswith('<!DOCTYPE'):
+                        # Parse CSV
+                        df = pd.read_csv(io.BytesIO(r_csv.content), encoding='utf-8')
+                        log(f"    ✓ Got {len(df)} products")
                         
-                        if r2.status_code == 200 and not r2.text.startswith('<!DOCTYPE'):
-                            # Parse CSV
-                            df = pd.read_csv(io.BytesIO(r2.content), encoding='utf-8')
-                            log(f"    ✓ Got {len(df)} products")
-                            
-                            # Add store information
-                            df['store'] = 'tommy'
-                            df['location'] = store_name
-                            
-                            # Append to all_products
-                            all_products.append(df)
-                            job["processed"] += 1
-                            break
-                    except Exception as e:
-                        continue
+                        # Add store info
+                        df['store'] = 'tommy'
+                        df['location'] = filename.replace('.csv', '').replace('_', ' ')
+                        
+                        all_dfs.append(df)
+                        job["processed"] += 1
+                    else:
+                        log(f"    ✗ Failed to download CSV: {r_csv.status_code}")
+                        
+                except Exception as e:
+                    log(f"    ✗ Error downloading {filename}: {e}")
+                    job["errors"].append(f"{filename}: {e}")
             
-            if all_products:
+            if all_dfs:
                 # Combine all store data
-                combined_df = pd.concat(all_products, ignore_index=True)
-                log(f"  Total products collected: {len(combined_df)}")
+                combined_df = pd.concat(all_dfs, ignore_index=True)
+                log(f"  Total products: {len(combined_df)}")
                 
-                # Process and save
+                # Process and push to Supabase
                 return process_tommy_dataframe(combined_df)
                 
+        except requests.exceptions.RequestException as e:
+            log(f"  Error fetching file list for {d}: {e}")
+            continue
         except Exception as e:
-            log(f"  Error for {d}: {e}")
+            log(f"  Unexpected error for {d}: {e}")
             continue
     
     raise ValueError("Tommy: no price data found")
-
+    
 def process_tommy_dataframe(df):
     """Process Tommy DataFrame and push to Supabase"""
     
