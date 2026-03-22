@@ -398,12 +398,24 @@ def download_kaufland():
         log(f"  No files for today, using yesterday: {len(today_files)} files")
     else:
         log(f"  Found {len(today_files)} files for today")
-    job["total"] += len(today_files)
-    csv_urls = ["https://www.kaufland.hr" + f["path"] for f in today_files]
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_download_one_csv, url, "kaufland"): url for url in csv_urls}
-        for future in as_completed(futures):
-            future.result()
+
+    if not today_files:
+        raise ValueError("Kaufland: no files found")
+
+    # ── DEBUG: download first file only and show raw response ──
+    test_file = today_files[0]
+    test_url  = "https://www.kaufland.hr" + test_file["path"]
+    log(f"  DEBUG — testing first file: {test_url}")
+
+    test_r = requests.get(test_url, headers=HEADERS, timeout=60)
+    log(f"  Status:       {test_r.status_code}")
+    log(f"  Content-Type: {test_r.headers.get('content-type', '?')}")
+    log(f"  Content-Length: {len(test_r.content)} bytes")
+    log(f"  First 300 bytes: {test_r.content[:300]}")
+
+    # Stop here so you can read the debug output
+    # Comment out the return below once we know what the response looks like
+    return
 
 def download_plodine():
     log("🟣 PLODINE — downloading ZIP...")
