@@ -1232,6 +1232,52 @@ def daily():
 def status():
     return jsonify({k: job[k] for k in job})
 
+@app.route("/scan-zabac-ui")
+def scan_zabac_ui():
+    """HTML interface for Zabac scan"""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Zabac Scanner</title>
+        <style>
+            body { font-family: monospace; padding: 20px; background: #111; color: #0f0; }
+            pre { background: #222; padding: 15px; border-radius: 8px; overflow-x: auto; }
+            .success { color: #0f0; }
+            .failure { color: #f00; }
+            .info { color: #ff0; }
+        </style>
+    </head>
+    <body>
+        <h1>🔍 Zabac File Scanner</h1>
+        <div id="results">Loading...</div>
+        
+        <script>
+            fetch('/scan-zabac?secret=' + prompt('Enter password:'))
+                .then(r => r.json())
+                .then(data => {
+                    let html = '<h2>📊 Scan Results</h2><pre>';
+                    data.scan_results.forEach(loc => {
+                        html += `\\n📍 ${loc.location}\\n`;
+                        for (const [date, exists] of Object.entries(loc.dates)) {
+                            const status = exists ? '✅ EXISTS' : '❌ MISSING';
+                            html += `  ${date}: ${status}\\n`;
+                        }
+                    });
+                    html += `\\n📁 Files found: ${data.found_files.length}\\n`;
+                    html += `\\n💡 ${data.conclusion.message}\\n`;
+                    html += `📌 ${data.conclusion.recommendation}\\n`;
+                    html += '</pre>';
+                    document.getElementById('results').innerHTML = html;
+                })
+                .catch(err => {
+                    document.getElementById('results').innerHTML = '<div class="failure">Error: ' + err + '</div>';
+                });
+        </script>
+    </body>
+    </html>
+    """
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
