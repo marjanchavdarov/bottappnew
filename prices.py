@@ -73,11 +73,11 @@ COLUMN_HINTS = [
     ("quantity",         ["neto", "kolici", "koli", "grama"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
     ("regular_price",    ["maloprodajna", "maloprod", "mpc (eur)", "mpc(eur)", "mpc eur", "mpc"]),
-    ("sale_price",       ["posebnog oblika", "posebno", "akcij", "akc", "sale", "poseb.oblik", "mpc poseb"]),
+    ("sale_price",       ["posebnog oblika", "posebno", "posebn", "akcij", "akc", "sale", "poseb.oblik", "mpc poseb"]),
     ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
-    ("category",         ["kategorij", "category", "grupe"]),
+    ("category",         ["kategorij", "category", "grupe", "robna"]),
 ]
 
 def fuzzy_rename(df):
@@ -309,12 +309,106 @@ def download_lidl():
             continue
     raise ValueError("Lidl ZIP not found for today or yesterday")
 
+# ── 1. Add these to COLUMN_HINTS (replace the existing sale_price and category lines) ──
+#
+# ("sale_price",       ["posebnog oblika", "posebno", "posebn", "akcij", "akc", "sale", "poseb.oblik", "mpc poseb"]),
+# ("category",         ["kategorij", "category", "grupe", "robna"]),
+#
+# "posebn" catches MPC_POSEBNA_PRODAJA (Tommy)
+# "robna"  catches ROBNA_STRUKTURA (Tommy)
+
+
+# ── 2. Replace download_tommy() with this ────────────────────────────────────
+
 def download_tommy():
-    log("🟠 TOMMY — downloading ZIP...")
-    r = requests.get("https://www.tommy.hr/fileadmin/user_upload/cjenik.zip", headers=HEADERS, timeout=120)
+    log("🟠 TOMMY — fetching file list from objava-cjenika...")
+
+    # Tommy publishes a page listing all store CSV files
+    listing_url = "https://www.tommy.hr/objava-cjenika"
+    r = requests.get(listing_url, headers=HEADERS, timeout=30)
     r.raise_for_status()
-    log(f"  ✓ {len(r.content)//1024} KB")
-    process_zip_bytes(r.content, "tommy", "csv")
+
+    # Extract all .csv links from the page
+    csv_links = re.findall(r'href="([^"]+\.csv)"', r.text)
+    if not csv_links:
+        # Fallback: try the static ZIP
+        log("  No CSV links found on page, trying static ZIP fallback...")
+        r2 = requests.get("https://www.tommy.hr/fileadmin/user_upload/cjenik.zip",
+                          headers=HEADERS, timeout=120)
+        r2.raise_for_status()
+        log(f"  ✓ ZIP {len(r2.content)//1024} KB")
+        process_zip_bytes(r2.content, "tommy", "csv")
+        return
+
+    # Make URLs absolute
+    base = "https://www.tommy.hr"
+    csv_urls = [l if l.startswith("http") else base + l for l in csv_links]
+    log(f"  Found {len(csv_urls)} CSV files")
+    job["total"] += len(csv_urls)
+
+    def _download_tommy_file(url):
+        filename = url.split("/")[-1]
+        job["current_file"] = filename[:80]
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=60)
+            r.raise_for_status()
+
+            # Tommy: comma-separated, Croatian decimal comma, UTF-8 or cp1250
+            df = None
+            for enc in ["utf-8-sig", "utf-8", "cp1250", "latin-1"]:
+                try:
+                    df = pd.read_csv(
+                        io.BytesIO(r.content),
+                        encoding=enc,
+                        sep=",",
+                        dtype=str,
+                        skipinitialspace=True,
+                    )
+                    break
+                except Exception:
+                    continue
+
+            if df is None:
+                raise ValueError("Could not decode CSV")
+
+            df.columns = [c.strip() for c in df.columns]
+            df = fuzzy_rename(df)
+
+            for col in ["regular_price", "sale_price", "lowest_30d_price", "anchor_price"]:
+                if col not in df.columns:
+                    df[col] = None
+                else:
+                    df[col] = pd.to_numeric(
+                        df[col].astype(str).str.strip()
+                            .str.replace(",", ".", regex=False)
+                            .str.replace(r"[^\d.]", "", regex=True),
+                        errors="coerce"
+                    )
+
+            if "barcode" not in df.columns:
+                log(f"  ❌ {filename}: no barcode. Cols: {list(df.columns)[:6]}")
+                job["errors"].append(f"{filename}: no barcode column")
+                return
+
+            df["barcode"] = df["barcode"].astype(str).str.strip().str.replace(r"\s+", "", regex=True)
+            df = df[df["barcode"].notna() & (df["barcode"] != "") & (df["barcode"] != "nan")]
+            df["current_price"] = df["sale_price"].combine_first(df["regular_price"])
+            df["is_on_sale"]    = df["sale_price"].notna() & (df["sale_price"] > 0)
+            df["store"]         = "tommy"
+            df["location"]      = location_from_filename(filename)
+
+            push_to_supabase(df, "tommy")
+            job["processed"] += 1
+            log(f"  ✓ {filename}: {len(df)} rows")
+
+        except Exception as e:
+            log(f"  ❌ {filename}: {e}")
+            job["errors"].append(f"{filename}: {e}")
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_download_tommy_file, url) for url in csv_urls]
+        for future in as_completed(futures):
+            future.result()
 
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
