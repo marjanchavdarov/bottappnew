@@ -419,7 +419,6 @@ def download_tommy():
         futures = {pool.submit(_download_one_csv, url, "tommy"): url for url in csv_urls}
         for future in as_completed(futures):
             future.result()
-
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
     today_str = date.today().strftime("%Y%m%d")
