@@ -73,7 +73,7 @@ COLUMN_HINTS = [
     ("quantity",         ["neto", "kolici", "koli", "grama"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
     ("regular_price",    ["maloprodajna", "maloprod", "mpc (eur)", "mpc(eur)", "mpc eur", "mpc"]),
-    ("sale_price",       ["posebnog oblika", "posebno", "akcij", "akc", "sale"]),
+    ("sale_price",       ["posebnog oblika", "posebno", "akcij", "akc", "sale", "poseb.oblik", "mpc poseb"]),
     ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
