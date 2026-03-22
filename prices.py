@@ -320,54 +320,79 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data - tries multiple approaches"""
-    log("🟠 TOMMY — fetching price data...")
+    """Download Tommy price data for all stores"""
+    log("🟠 TOMMY — fetching price data from all stores...")
     
-    for delta in [0, 1, 2]:  # Try last 3 days
+    api_headers = {**HEADERS, "Accept": "application/json"}
+    all_products = []
+    
+    for delta in [0, 1, 2]:
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
         
-        # Approach 1: Direct CSV endpoint with .csv extension
-        csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables.csv?date={d}"
-        log(f"  Trying: {csv_url}")
+        # First, get list of stores
+        stores_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}&itemsPerPage=100"
         
         try:
-            r = requests.get(csv_url, headers=HEADERS, timeout=30)
-            if r.status_code == 200 and not r.text.startswith('<!DOCTYPE'):
-                df = pd.read_csv(io.BytesIO(r.content), encoding='utf-8')
-                log(f"  ✓ CSV: {len(df)} rows")
-                return process_tommy_dataframe(df)
-        except Exception as e:
-            log(f"  CSV attempt failed: {e}")
-        
-        # Approach 2: CSV with Accept header
-        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}"
-        headers_csv = {**HEADERS, "Accept": "text/csv"}
-        
-        try:
-            r = requests.get(url, headers=headers_csv, timeout=30)
-            if r.status_code == 200 and not r.text.startswith('<!DOCTYPE'):
-                df = pd.read_csv(io.BytesIO(r.content), encoding='utf-8')
-                log(f"  ✓ CSV (Accept): {len(df)} rows")
-                return process_tommy_dataframe(df)
-        except Exception as e:
-            log(f"  CSV Accept attempt failed: {e}")
-        
-        # Approach 3: JSON-LD
-        headers_json = {**HEADERS, "Accept": "application/ld+json"}
-        
-        try:
-            r = requests.get(url, headers=headers_json, timeout=30)
+            r = requests.get(stores_url, headers=api_headers, timeout=30)
             r.raise_for_status()
             data = r.json()
+            stores = data.get("hydra:member", [])
             
-            if "hydra:member" in data and data["hydra:member"]:
-                df = pd.DataFrame(data["hydra:member"])
-                log(f"  ✓ JSON: {len(df)} rows")
-                return process_tommy_dataframe(df)
+            if not stores:
+                log(f"  No stores found for {d}")
+                continue
+                
+            log(f"  Found {len(stores)} stores for {d}")
+            job["total"] += len(stores)
+            
+            # Download price data for each store
+            for idx, store in enumerate(stores):
+                # Get the store identifier from the @id field
+                store_id = store.get("@id", "").split("/")[-1]
+                store_name = store.get("filename", f"store_{idx}")
+                
+                job["current_file"] = f"Store {idx+1}/{len(stores)}: {store_name}"
+                
+                # Try different URL patterns to get the price CSV
+                csv_urls = [
+                    f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables/{store_id}.csv?date={d}",
+                    f"https://spiza.tommy.hr{store.get('@id')}.csv?date={d}",
+                ]
+                
+                for csv_url in csv_urls:
+                    try:
+                        log(f"    Fetching: {csv_url[:80]}...")
+                        r2 = requests.get(csv_url, headers={**HEADERS, "Accept": "text/csv"}, timeout=60)
+                        
+                        if r2.status_code == 200 and not r2.text.startswith('<!DOCTYPE'):
+                            # Parse CSV
+                            df = pd.read_csv(io.BytesIO(r2.content), encoding='utf-8')
+                            log(f"    ✓ Got {len(df)} products")
+                            
+                            # Add store information
+                            df['store'] = 'tommy'
+                            df['location'] = store_name
+                            
+                            # Append to all_products
+                            all_products.append(df)
+                            job["processed"] += 1
+                            break
+                    except Exception as e:
+                        continue
+            
+            if all_products:
+                # Combine all store data
+                combined_df = pd.concat(all_products, ignore_index=True)
+                log(f"  Total products collected: {len(combined_df)}")
+                
+                # Process and save
+                return process_tommy_dataframe(combined_df)
+                
         except Exception as e:
-            log(f"  JSON attempt failed: {e}")
+            log(f"  Error for {d}: {e}")
+            continue
     
-    raise ValueError("Tommy: no data found for last 3 days")
+    raise ValueError("Tommy: no price data found")
 
 def process_tommy_dataframe(df):
     """Process Tommy DataFrame and push to Supabase"""
