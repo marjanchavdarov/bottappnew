@@ -168,8 +168,21 @@ def parse_xml(src, store, filename=""):
     else:
         root = ET.parse(src).getroot()
 
-    items = (root.findall(".//artikal") or root.findall(".//Artikal")
-             or root.findall(".//item") or root.findall(".//product"))
+    # Handle Studenac format: Proizvodi -> ProdajniObjekt -> Proizvodi -> Proizvod
+    items = []
+    
+    # Check if this is Studenac format (has ProdajniObjekt)
+    prodajni_objekt = root.find('ProdajniObjekt')
+    if prodajni_objekt is not None:
+        inner_proizvodi = prodajni_objekt.find('Proizvodi')
+        if inner_proizvodi is not None:
+            items = inner_proizvodi.findall('Proizvod')
+            log(f"  Found {len(items)} products in Studenac format")
+    else:
+        # Original format: look for artikal, Artikal, item, product directly under root
+        items = (root.findall(".//artikal") or root.findall(".//Artikal")
+                 or root.findall(".//item") or root.findall(".//product"))
+    
     if not items:
         raise ValueError(f"No product elements. Root: {root.tag}")
 
@@ -181,29 +194,58 @@ def parse_xml(src, store, filename=""):
                 if el is not None and el.text:
                     return el.text.strip()
             return None
+        
+        # Try to find barcode from various possible tags
+        barcode = get("barkod", "Barkod", "barcode", "ean", "EAN", "Barkod_artikla")
+        
         rows.append({
-            "name":          get("naziv","Naziv","name"),
-            "brand":         get("marka","Marka","brand"),
-            "barcode":       get("barkod","Barkod","barcode","ean","EAN"),
-            "regular_price": get("mpc","MPC","cijena","price"),
-            "sale_price":    get("akcijska_cijena","akcijskaCijena","sale_price"),
-            "category":      get("kategorija","Kategorija","category"),
-            "quantity":      get("kolicina","Kolicina","neto_kolicina"),
-            "unit":          get("jedinica","Jedinica","unit"),
+            "name":          get("naziv", "Naziv", "NazivProizvoda", "name"),
+            "brand":         get("marka", "Marka", "MarkaProizvoda", "brand"),
+            "barcode":       barcode,
+            "regular_price": get("mpc", "MPC", "cijena", "price", "MaloprodajnaCijena"),
+            "sale_price":    get("akcijska_cijena", "akcijskaCijena", "sale_price", "MaloprodajnaCijenaAkcija"),
+            "category":      get("kategorija", "Kategorija", "category", "KategorijeProizvoda"),
+            "quantity":      get("kolicina", "Kolicina", "neto_kolicina", "NetoKolicina"),
+            "unit":          get("jedinica", "Jedinica", "unit", "JedinicaMjere"),
+            "lowest_30d_price": get("najniza", "najniža", "najniza_cijena", "NajnizaCijena"),
+            "anchor_price":  get("sidrena", "sidrena_cijena", "SidrenaCijena"),
         })
 
     df = pd.DataFrame(rows)
-    for col in ["regular_price", "sale_price"]:
-        df[col] = pd.to_numeric(
-            df[col].astype(str).str.replace(",",".").str.replace(r"[^\d.]","",regex=True),
-            errors="coerce"
-        )
-    df["barcode"]       = df["barcode"].astype(str).str.strip()
-    df                  = df[df["barcode"].notna() & (df["barcode"] != "nan")]
-    df["current_price"] = df["sale_price"].combine_first(df["regular_price"])
-    df["is_on_sale"]    = df["sale_price"].notna() & (df["sale_price"] > 0)
-    df["store"]         = store
-    df["location"]      = location_from_filename(filename)
+    
+    # Clean price columns
+    for col in ["regular_price", "sale_price", "lowest_30d_price", "anchor_price"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", ".").str.replace(r"[^\d.]", "", regex=True),
+                errors="coerce"
+            )
+    
+    # Clean barcode
+    if "barcode" in df.columns:
+        df["barcode"] = df["barcode"].astype(str).str.strip()
+    else:
+        raise ValueError("No barcode column found")
+    
+    # Remove rows without barcode
+    df = df[df["barcode"].notna() & (df["barcode"] != "nan")]
+    
+    # Set current price (sale price takes precedence)
+    if "sale_price" in df.columns:
+        df["current_price"] = df["sale_price"].combine_first(df.get("regular_price"))
+    else:
+        df["current_price"] = df.get("regular_price")
+    
+    df["is_on_sale"] = (df.get("sale_price", pd.Series([None])).notna() & 
+                        (df.get("sale_price", 0) > 0))
+    
+    # Remove rows without price
+    df = df[df["current_price"].notna()]
+    
+    df["store"] = store
+    df["location"] = location_from_filename(filename)
+    
+    log(f"  Parsed {len(df)} valid products from {os.path.basename(filename)}")
     return df
 
 # ─── Process ZIP bytes ────────────────────────────────────────────────────────
