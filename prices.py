@@ -25,7 +25,11 @@ SUPABASE_URL         = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY         = os.environ.get("SUPABASE_KEY", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; katalog-prices/1.0)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer":    "https://www.kaufland.hr/akcije-novosti/popis-mpc.html",
+    "Accept":     "text/csv,application/octet-stream,*/*",
+}
 
 job = {
     "running": False, "status": "idle", "store": "",
