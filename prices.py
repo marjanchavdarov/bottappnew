@@ -403,11 +403,33 @@ def download_kaufland():
         raise ValueError("Kaufland: no files found for today or yesterday")
 
     job["total"] += len(today_files)
-    csv_urls = ["https://www.kaufland.hr" + f["path"] for f in today_files]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(_download_one_csv, url, "kaufland"): url for url in csv_urls}
-        for future in as_completed(futures):
-            future.result()
+
+    # Sequential download with delay — concurrent requests get rate-limited
+    import time
+    for idx, f in enumerate(today_files):
+        url = "https://www.kaufland.hr" + f["path"]
+        filename = url.split("/")[-1]
+        job["current_file"] = filename[:80]
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=60)
+            r.raise_for_status()
+
+            # Bail if CDN returned HTML instead of CSV
+            if r.content[:15].lower().lstrip().startswith((b"<!doctype", b"<html")):
+                log(f"  ❌ {filename}: CDN returned HTML (rate limited)")
+                job["errors"].append(f"{filename}: CDN returned HTML")
+                time.sleep(2)
+                continue
+
+            df = parse_csv(r.content, "kaufland", filename=filename)
+            push_to_supabase(df, "kaufland")
+            job["processed"] += 1
+            log(f"  [{idx+1}/{len(today_files)}] ✓ {filename}: {len(df)} rows")
+            time.sleep(0.3)  # be polite, avoid rate limiting
+
+        except Exception as e:
+            log(f"  ❌ {filename}: {e}")
+            job["errors"].append(f"{filename}: {e}")
 
 def download_plodine():
     log("🟣 PLODINE — downloading ZIP...")
