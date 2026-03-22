@@ -320,84 +320,54 @@ def download_lidl():
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
 def download_tommy():
-    """Download Tommy price data - handles paginated API"""
-    log("🟠 TOMMY — fetching price data from API...")
+    """Download Tommy price data - tries multiple approaches"""
+    log("🟠 TOMMY — fetching price data...")
     
-    api_headers = {
-        **HEADERS,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    
-    all_data = []
-    page = 1
-    total_pages = None
-    
-    for delta in [0, 1]:
+    for delta in [0, 1, 2]:  # Try last 3 days
         d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
         
-        while total_pages is None or page <= total_pages:
-            url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables"
-            params = {
-                'date': d,
-                'page': page,
-                'itemsPerPage': 100  # Max items per page
-            }
-            
-            try:
-                log(f"  Fetching page {page} for {d}...")
-                r = requests.get(url, headers=api_headers, params=params, timeout=60)
-                r.raise_for_status()
-                
-                data = r.json()
-                
-                # Get total pages from response
-                if total_pages is None and 'hydra:view' in data:
-                    last_page_url = data['hydra:view'].get('hydra:last', '')
-                    if 'page=' in last_page_url:
-                        total_pages = int(last_page_url.split('page=')[1].split('&')[0])
-                    log(f"  Total pages: {total_pages}")
-                
-                # Extract members
-                members = data.get('hydra:member', [])
-                log(f"  Got {len(members)} items on page {page}")
-                
-                if not members:
-                    break
-                
-                all_data.extend(members)
-                
-                # Check if this was the last page
-                if 'hydra:view' in data and 'hydra:next' not in data['hydra:view']:
-                    break
-                    
-                page += 1
-                
-                # Safety limit
-                if page > 100:
-                    break
-                    
-            except Exception as e:
-                log(f"  Error on page {page}: {e}")
-                break
+        # Approach 1: Direct CSV endpoint with .csv extension
+        csv_url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables.csv?date={d}"
+        log(f"  Trying: {csv_url}")
         
-        if all_data:
-            log(f"  Total items collected: {len(all_data)}")
-            break
-        else:
-            log(f"  No data for {d}")
-            page = 1
-            total_pages = None
+        try:
+            r = requests.get(csv_url, headers=HEADERS, timeout=30)
+            if r.status_code == 200 and not r.text.startswith('<!DOCTYPE'):
+                df = pd.read_csv(io.BytesIO(r.content), encoding='utf-8')
+                log(f"  ✓ CSV: {len(df)} rows")
+                return process_tommy_dataframe(df)
+        except Exception as e:
+            log(f"  CSV attempt failed: {e}")
+        
+        # Approach 2: CSV with Accept header
+        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?date={d}"
+        headers_csv = {**HEADERS, "Accept": "text/csv"}
+        
+        try:
+            r = requests.get(url, headers=headers_csv, timeout=30)
+            if r.status_code == 200 and not r.text.startswith('<!DOCTYPE'):
+                df = pd.read_csv(io.BytesIO(r.content), encoding='utf-8')
+                log(f"  ✓ CSV (Accept): {len(df)} rows")
+                return process_tommy_dataframe(df)
+        except Exception as e:
+            log(f"  CSV Accept attempt failed: {e}")
+        
+        # Approach 3: JSON-LD
+        headers_json = {**HEADERS, "Accept": "application/ld+json"}
+        
+        try:
+            r = requests.get(url, headers=headers_json, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            
+            if "hydra:member" in data and data["hydra:member"]:
+                df = pd.DataFrame(data["hydra:member"])
+                log(f"  ✓ JSON: {len(df)} rows")
+                return process_tommy_dataframe(df)
+        except Exception as e:
+            log(f"  JSON attempt failed: {e}")
     
-    if not all_data:
-        raise ValueError("Tommy: no data found")
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(all_data)
-    log(f"  DataFrame columns: {list(df.columns)}")
-    
-    # Process the data
-    return process_tommy_dataframe(df)
+    raise ValueError("Tommy: no data found for last 3 days")
 
 def process_tommy_dataframe(df):
     """Process Tommy DataFrame and push to Supabase"""
