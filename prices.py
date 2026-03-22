@@ -319,106 +319,25 @@ def download_lidl():
 
 
 # ── 2. Replace download_tommy() with this ────────────────────────────────────
-
 def download_tommy():
-    log("🟠 TOMMY — fetching file list from objava-cjenika...")
-
-    r = requests.get("https://www.tommy.hr/objava-cjenika", headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    html = r.text
-
-    # Tommy uses download links — try multiple patterns
-    import re as _re
-    patterns = [
-        r'href="([^"]*\.csv[^"]*)"',           # standard href
-        r"href='([^']*\.csv[^']*)'",            # single-quote href
-        r'"url"\s*:\s*"([^"]*\.csv[^"]*)"',     # JSON url field
-        r'data-href="([^"]*\.csv[^"]*)"',        # data-href
-        r'action="([^"]*\.csv[^"]*)"',           # form action
-        r'(https?://[^\s"\'<>]+\.csv)',          # bare URL
-    ]
-
-    csv_links = []
-    for pat in patterns:
-        found = _re.findall(pat, html, _re.IGNORECASE)
-        csv_links.extend(found)
-
-    # Also look for fileadmin paths (Tommy uses TYPO3 CMS)
-    fileadmin = _re.findall(r'(/fileadmin/[^\s"\'<>]+)', html)
-    csv_links.extend([l for l in fileadmin if l.lower().endswith('.csv')])
-
-    # Deduplicate
-    csv_links = list(dict.fromkeys(csv_links))
-
-    if not csv_links:
-        # Log first 2000 chars of HTML so we can see the structure
-        log(f"  ⚠️  No CSV links found. HTML preview:")
-        log(f"  {html[:2000]}")
-        raise ValueError("Tommy: no CSV links found on objava-cjenika page")
-
-    base = "https://www.tommy.hr"
-    csv_urls = [l if l.startswith("http") else base + l for l in csv_links]
-    log(f"  Found {len(csv_urls)} CSV files")
-    job["total"] += len(csv_urls)
-
-   def download_tommy():
     log("🟠 TOMMY — fetching via spiza.tommy.hr API...")
-
     today_str = date.today().strftime("%Y-%m-%d")
-
-    # Sylius/Hydra API — needs Accept: application/json or it returns Swagger UI HTML
-    api_headers = {
-        **HEADERS,
-        "Accept": "application/json",
-    }
-
-    # Step 1: get file list
-    url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={today_str}"
-    log(f"  Fetching: {url}")
-    r = requests.get(url, headers=api_headers, timeout=30)
-    r.raise_for_status()
-
-    data = r.json()
-    log(f"  Response keys: {list(data.keys())}")
-
-    members = data.get("hydra:member", data.get("member", []))
-    if not members:
-        # Try yesterday if today's not published yet
-        yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={yesterday}"
-        log(f"  No data for today, trying yesterday: {url}")
+    api_headers = {**HEADERS, "Accept": "application/json"}
+    for delta in [0, 1]:
+        d = (date.today() - timedelta(days=delta)).strftime("%Y-%m-%d")
+        url = f"https://spiza.tommy.hr/api/v2/shop/store-prices-tables?itemsPerPage=200&date={d}"
+        log(f"  Trying: {url}")
         r = requests.get(url, headers=api_headers, timeout=30)
         r.raise_for_status()
         data = r.json()
-        members = data.get("hydra:member", data.get("member", []))
+        members = data.get("hydra:member", [])
+        if members:
+            log(f"  Found {len(members)} entries")
+            log(f"  First entry keys: {list(members[0].keys())}")
+            log(f"  First entry: {str(members[0])[:400]}")
+            return
+    raise ValueError("Tommy: no data found for today or yesterday")
 
-    if not members:
-        raise ValueError(f"Tommy API returned no members. Keys: {list(data.keys())}, preview: {str(data)[:300]}")
-
-    log(f"  Found {len(members)} entries. First entry keys: {list(members[0].keys()) if members else 'N/A'}")
-    log(f"  First entry preview: {str(members[0])[:300]}")
-
-    # Extract CSV URLs — field name TBD from actual response
-    csv_urls = []
-    for item in members:
-        # Try common field names
-        url = (item.get("filePath") or item.get("file") or item.get("url") or
-               item.get("csvFile") or item.get("path") or item.get("downloadUrl") or "")
-        if url and url.lower().endswith(".csv"):
-            if not url.startswith("http"):
-                url = "https://spiza.tommy.hr" + url
-            csv_urls.append(url)
-
-    log(f"  Found {len(csv_urls)} CSV URLs")
-    if not csv_urls:
-        log(f"  ⚠️  No CSV URLs found. Full first item: {members[0]}")
-        return
-
-    job["total"] += len(csv_urls)
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(_download_one_csv, url, "tommy"): url for url in csv_urls}
-        for future in as_completed(futures):
-            future.result()
 def download_spar():
     log("🟢 SPAR — fetching JSON index...")
     today_str = date.today().strftime("%Y%m%d")
