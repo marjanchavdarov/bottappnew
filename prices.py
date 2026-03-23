@@ -76,11 +76,11 @@ COLUMN_HINTS = [
     ("quantity",         ["neto", "kolici", "koli", "grama"]),
     ("unit",             ["jedinica mjere", "jedinica"]),
     ("regular_price",    ["maloprodajna", "maloprod", "mpc (eur)", "mpc(eur)", "mpc eur", "mpc"]),
-    ("sale_price",       ["posebnog oblika", "posebno", "posebn", "akcij", "akc", "sale", "poseb.oblik", "mpc poseb"]),
+    ("sale_price",       ["posebnog oblika", "posebno", "poseb.oblik", "mpc poseb", "posebn", "mpc_posebna", "akcij", "akc", "sale"]),
     ("lowest_30d_price", ["30 dan", "30dana", "30 dana", "najni"]),
     ("anchor_price",     ["sidrena", "anchor"]),
     ("barcode",          ["barkod", "barcode", "ean"]),
-    ("category",         ["kategorij", "category", "grupe", "robna"]),
+    ("category",         ["kategorij", "category", "grupe", "robna", "robna_strukt"]),
 ]
 
 def fuzzy_rename(df):
@@ -1200,7 +1200,7 @@ def start_ingest():
     if mode == "auto":
         stores_param = request.form.get("stores", "all")
         stores = ALL_STORES if stores_param == "all" else [stores_param]
-        threading.Thread(target=run_job, kwargs={"stores": stores}, daemon=True).start()
+        threading.Thread(target=run_job_with_log, kwargs={"stores": stores, "triggered_by": "manual"}, daemon=True).start()
         return jsonify({"ok": True})
     store = request.form.get("store", "konzum")
     files = request.files.getlist("files")
@@ -1213,24 +1213,144 @@ def start_ingest():
         tmp = f"/tmp/prices_{store}_{i}_{date.today()}.{ext}"
         f.save(tmp)
         filepaths.append(tmp)
-    threading.Thread(target=run_job,
-                     kwargs={"stores": [], "manual_files": filepaths, "manual_store": store},
-                     daemon=True).start()
+    threading.Thread(target=run_job_with_log,
+                 kwargs={"stores": [], "manual_files": filepaths, "manual_store": store, "triggered_by": "upload"},
+                 daemon=True).start()
     return jsonify({"ok": True})
 
 @app.route("/daily", methods=["GET", "POST"])
 def daily():
+    """
+    Called by UptimeRobot 3x per day: 07:00, 10:00, 13:00 Croatian time.
+    Smart: skips stores already successfully downloaded today.
+    """
     secret = request.args.get("secret") or request.form.get("secret")
     if secret != UPLOAD_PASSWORD:
         return jsonify({"error": "Unauthorized"}), 403
-    if job["running"]:
-        return jsonify({"status": "already running"})
-    threading.Thread(target=run_job, kwargs={"stores": ALL_STORES}, daemon=True).start()
-    return jsonify({"status": "started", "stores": ALL_STORES})
 
-@app.route("/status")
-def status():
-    return jsonify({k: job[k] for k in job})
+    if job["running"]:
+        return jsonify({"status": "already running", "store": job["store"]})
+
+    today = str(date.today())
+    stores_done = get_stores_done_today(today)
+    stores_to_run = [s for s in ALL_STORES if s not in stores_done]
+
+    if not stores_to_run:
+        log(f"✅ All stores already updated for {today}")
+        return jsonify({
+            "status": "already_complete",
+            "date": today,
+            "stores_done": stores_done,
+        })
+
+    log(f"📅 Daily run {today}. Done: {stores_done}. Running: {stores_to_run}")
+    threading.Thread(
+        target=run_job_with_log,
+        kwargs={"stores": stores_to_run, "triggered_by": "daily"},
+        daemon=True
+    ).start()
+
+    return jsonify({
+        "status": "started",
+        "date": today,
+        "stores_running": stores_to_run,
+        "stores_already_done": stores_done,
+    })
+
+def get_stores_done_today(today_str):
+    """Return list of stores that already have price data for today."""
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/store_prices",
+            headers=db_headers(),
+            params={
+                "price_date": f"eq.{today_str}",
+                "select": "store",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            rows = resp.json()
+            return list(set(r["store"] for r in rows))
+    except Exception as e:
+        log(f"  ⚠️  Could not check done stores: {e}")
+    return []
+
+
+def run_job_with_log(stores, triggered_by="manual", manual_files=None, manual_store=None):
+    """Wrapper around run_job that logs to schedule_log table."""
+    start_time = datetime.now()
+    log_id = None
+
+    try:
+        resp = requests.post(
+            f"{SUPABASE_URL}/rest/v1/schedule_log",
+            headers={**db_headers(), "Prefer": "return=representation"},
+            json={
+                "run_at": start_time.isoformat(),
+                "stores": stores or ([manual_store] if manual_store else []),
+                "status": "started",
+                "notes": f"triggered_by={triggered_by}",
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            rows = resp.json()
+            if rows:
+                log_id = rows[0].get("id")
+    except Exception as e:
+        log(f"  ⚠️  Could not write schedule_log start: {e}")
+
+    # Run the actual job
+    run_job(stores=stores or [], manual_files=manual_files, manual_store=manual_store)
+
+    # Update log with result
+    duration = int((datetime.now() - start_time).total_seconds())
+    if log_id:
+        try:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/schedule_log?id=eq.{log_id}",
+                headers=db_headers(),
+                json={
+                    "status": "done" if not job["errors"] else "partial",
+                    "products": job["processed"],
+                    "errors": len(job["errors"]),
+                    "duration_s": duration,
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            log(f"  ⚠️  Could not update schedule_log: {e}")
+
+
+@app.route("/schedule/status")
+def schedule_status():
+    """Quick check: what's been downloaded today and what's missing."""
+    today = str(date.today())
+    done = get_stores_done_today(today)
+    missing = [s for s in ALL_STORES if s not in done]
+    return jsonify({
+        "date": today,
+        "done": done,
+        "missing": missing,
+        "all_complete": len(missing) == 0,
+    })
+
+
+@app.route("/schedule/history")
+def schedule_history():
+    """Show last 20 scheduled runs."""
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/schedule_log",
+            headers=db_headers(),
+            params={"order": "run_at.desc", "limit": "20"},
+            timeout=10,
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+    except Exception:
+        rows = []
+    return jsonify(rows)
 
 @app.route("/scan-zabac-ui")
 def scan_zabac_ui():
