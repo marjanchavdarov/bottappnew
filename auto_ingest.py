@@ -4,6 +4,7 @@ import pandas as pd
 import requests
 import gc
 import math
+import time
 from datetime import date
 from dotenv import load_dotenv
 
@@ -22,15 +23,17 @@ def safe_float(val):
     except: 
         return None
 
-def bulk_upsert(table, data):
+def bulk_upsert(table, data, max_retries=3):
     if not data: 
         return
     
     # Determine conflict columns based on table
     if table == "master_products":
         conf = "barcode"
+        batch_size = 2000
     else:
         conf = "barcode,store,price_date"
+        batch_size = 1000  # Smaller batches for store_prices to avoid timeouts
     
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={conf}"
     headers = {
@@ -40,14 +43,52 @@ def bulk_upsert(table, data):
         "Prefer": "resolution=merge-duplicates"
     }
     
-    try:
-        r = requests.post(url, headers=headers, json=data, timeout=60)
-        if r.status_code >= 400:
-            print(f"   ❌ {table} Error: {r.text[:200]}")
-        else:
-            print(f"   ✅ {table} upserted {len(data)} records")
-    except Exception as e:
-        print(f"   ❌ {table} Request failed: {e}")
+    successful_batches = 0
+    
+    for i in range(0, len(data), batch_size):
+        batch = data[i:i+batch_size]
+        
+        # Retry logic for timeout errors
+        for attempt in range(max_retries):
+            try:
+                # Add a small delay between batches to prevent overwhelming the database
+                if i > 0 and table == "store_prices":
+                    time.sleep(0.3)
+                
+                r = requests.post(url, headers=headers, json=batch, timeout=120)
+                
+                if r.status_code >= 400:
+                    error_text = r.text[:200]
+                    # Check if it's a timeout error
+                    if "57014" in error_text or "timeout" in error_text.lower():
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2  # 2, 4, 6 seconds
+                            print(f"   ⏳ Timeout, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            print(f"   ❌ {table} Error after {max_retries} retries: {error_text}")
+                    else:
+                        print(f"   ❌ {table} Error: {error_text}")
+                else:
+                    successful_batches += 1
+                    # Print progress occasionally to avoid log spam
+                    total_batches = (len(data) + batch_size - 1) // batch_size
+                    if total_batches <= 20 or successful_batches % 5 == 0 or i + batch_size >= len(data):
+                        print(f"   ✅ {table} upserted {min(i + batch_size, len(data))}/{len(data)} records")
+                
+                break  # Success, exit retry loop
+                
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    print(f"   ⏳ Request timeout, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ {table} Request timeout after {max_retries} retries")
+            except Exception as e:
+                print(f"   ❌ {table} Request failed: {e}")
+                break
 
 def process_zip(zip_path):
     today = date.today().isoformat()
@@ -58,8 +99,8 @@ def process_zip(zip_path):
         
         print(f"📁 Found {len(folders)} stores to process")
         
-        for store in folders:
-            print(f"\n🏪 Shop: {store.upper()}")
+        for store_idx, store in enumerate(folders, 1):
+            print(f"\n🏪 [{store_idx}/{len(folders)}] Shop: {store.upper()}")
             
             try:
                 # 1. Read CSV files
@@ -67,11 +108,12 @@ def process_zip(zip_path):
                 df_s = pd.read_csv(z.open(f"{store}/stores.csv"), dtype=str).fillna('')
                 df_prices = pd.read_csv(z.open(f"{store}/prices.csv"), dtype=str).fillna('')
                 
-                print(f"   📊 Products: {len(df_p)}, Stores: {len(df_s)}, Prices: {len(df_prices)}")
+                print(f"   📊 Products: {len(df_p):,}, Stores: {len(df_s):,}, Prices: {len(df_prices):,}")
                 
                 # 2. Clean barcodes - just strip whitespace, don't split
                 df_p['barcode'] = df_p['barcode'].astype(str).str.strip()
                 df_p = df_p[df_p['barcode'] != '']
+                df_p = df_p[df_p['barcode'].str.len() >= 6]  # Filter out invalid barcodes
                 
                 # 3. Deduplicate products by barcode for master_products
                 catalog = df_p.drop_duplicates('barcode')[['barcode', 'name']].copy()
@@ -79,9 +121,8 @@ def process_zip(zip_path):
                 # 4. Upsert master_products
                 if not catalog.empty:
                     p_recs = catalog.to_dict(orient='records')
-                    print(f"   📦 Upserting {len(p_recs)} products to master_products")
-                    for i in range(0, len(p_recs), 1000):
-                        bulk_upsert("master_products", p_recs[i:i+1000])
+                    print(f"   📦 Upserting {len(p_recs):,} products to master_products")
+                    bulk_upsert("master_products", p_recs)
                 
                 # 5. Prepare for price merging - deduplicate products and stores
                 unique_products = df_p.drop_duplicates('product_id')[['product_id', 'barcode']]
@@ -91,13 +132,13 @@ def process_zip(zip_path):
                 merged = df_prices.merge(unique_products, on='product_id', how='inner')
                 merged = merged.merge(unique_stores, on='store_id', how='inner')
                 
-                print(f"   🔗 Merged {len(merged)} price records")
+                print(f"   🔗 Merged {len(merged):,} price records")
                 
                 # 7. Build final price records
                 final_prices = []
                 for _, row in merged.iterrows():
                     p_val = safe_float(row.get('price'))
-                    if p_val is not None and row['barcode']:
+                    if p_val is not None and row['barcode'] and p_val > 0:
                         # Format store name
                         store_name = f"{store.capitalize()} - {row['city']}"
                         final_prices.append({
@@ -114,11 +155,8 @@ def process_zip(zip_path):
                         subset=['barcode', 'store', 'price_date']
                     ).to_dict(orient='records')
                     
-                    print(f"   💰 Upserting {len(clean_prices)} price records")
-                    
-                    # Upsert in batches
-                    for i in range(0, len(clean_prices), 3000):
-                        bulk_upsert("store_prices", clean_prices[i:i+3000])
+                    print(f"   💰 Upserting {len(clean_prices):,} price records")
+                    bulk_upsert("store_prices", clean_prices)
                 else:
                     print(f"   ⚠️ No valid prices found")
                 
@@ -138,6 +176,7 @@ def process_zip(zip_path):
 def main():
     print("🌍 Starting data sync...")
     print("=" * 50)
+    start_time = time.time()
     
     # Check environment variables
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -185,8 +224,9 @@ def main():
             os.remove(zip_path)
             print("\n🗑️ Cleaned up temporary files")
         
+        elapsed_time = time.time() - start_time
         print("\n" + "=" * 50)
-        print("🏁 SYNC COMPLETE!")
+        print(f"🏁 SYNC COMPLETE! (took {elapsed_time / 60:.1f} minutes)")
         
     except requests.exceptions.RequestException as e:
         print(f"❌ Network error: {e}")
