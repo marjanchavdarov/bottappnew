@@ -1,8 +1,4 @@
-flask
-flask-cors
-pandas
-requests
-python-dotenv
-lxml
-gunicorn
-supabase
+python-dotenv>=1.0.0
+supabase>=2.0.0
+supabase-py>=0.5.0
+requests>=2.31.0
