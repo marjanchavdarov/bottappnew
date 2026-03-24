@@ -9,10 +9,10 @@ from supabase import create_client
 load_dotenv()
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-MCP_URL = "https://api.cijene.dev/mcp"
+BASE_URL = "https://api.cijene.dev"
 
 print("=" * 60)
-print("🌍 MCP Price Sync Started")
+print("🌍 Cijene API Sync Started")
 print("=" * 60)
 
 # Check credentials
@@ -30,74 +30,80 @@ except Exception as e:
     print(f"❌ Failed to initialize Supabase: {e}")
     exit(1)
 
-def call_mcp_api(endpoint, data=None):
-    """Call MCP API with proper format"""
-    try:
-        if data:
-            response = requests.post(f"{MCP_URL}/{endpoint}", json=data, timeout=30)
-        else:
-            response = requests.get(f"{MCP_URL}/{endpoint}", timeout=30)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"   ⚠️ API returned {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"   ❌ API call failed: {e}")
-        return None
-
 def get_chains():
     """Get list of chains from the API"""
     print("📡 Fetching chains...")
+    try:
+        # Try to get chains from the API
+        response = requests.get(f"{BASE_URL}/v0/chains", timeout=10)
+        if response.status_code == 200:
+            chains = response.json()
+            print(f"✅ Found {len(chains)} chains from API")
+            return chains
+    except:
+        pass
     
-    # Try different endpoints
-    endpoints = ["/chains", "/list", "/v0/chains", "/api/chains"]
-    
-    for endpoint in endpoints:
-        try:
-            response = requests.get(f"https://api.cijene.dev{endpoint}", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                print(f"✅ Found chains via {endpoint}")
-                return data
-        except:
-            continue
-    
-    # Fallback: known chains from Croatia
+    # Fallback chains (Croatian retailers)
     print("⚠️ Using fallback chain list")
     return [
-        {"id": "konzum", "name": "KONZUM"},
-        {"id": "lidle", "name": "LIDL"},
-        {"id": "spar", "name": "SPAR"},
-        {"id": "plodine", "name": "PLODINE"},
-        {"id": "studenac", "name": "STUDENAC"},
+        {"id": "konzum", "name": "Konzum"},
+        {"id": "lidl", "name": "Lidl"},
+        {"id": "spar", "name": "Spar"},
+        {"id": "plodine", "name": "Plodine"},
+        {"id": "studenac", "name": "Studenac"},
         {"id": "dm", "name": "DM"},
-        {"id": "boso", "name": "BOSO"},
-        {"id": "eurospin", "name": "EUROSPIN"}
+        {"id": "boso", "name": "Boso"},
+        {"id": "eurospin", "name": "Eurospin"},
+        {"id": "tommy", "name": "Tommy"},
+        {"id": "ktc", "name": "KTC"},
+        {"id": "metro", "name": "Metro"},
+        {"id": "kaufland", "name": "Kaufland"}
     ]
 
-def get_products_by_chain(chain_name, limit=100):
-    """Get products for a specific chain"""
-    # Try different API formats
-    endpoints = [
-        f"/v0/products?chain={chain_name}&limit={limit}",
-        f"/products?chain={chain_name}&limit={limit}",
-        f"/api/products?chain={chain_name}&limit={limit}"
-    ]
+def get_products_by_chain(chain_name, limit=500, offset=0):
+    """Get products for a specific chain from the API"""
+    try:
+        # Try different API endpoints
+        endpoints = [
+            f"{BASE_URL}/v0/products?chain={chain_name}&limit={limit}&offset={offset}",
+            f"{BASE_URL}/v0/search?chain={chain_name}&limit={limit}&offset={offset}",
+            f"{BASE_URL}/api/products?chain={chain_name}&limit={limit}"
+        ]
+        
+        for endpoint in endpoints:
+            try:
+                response = requests.get(endpoint, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data:
+                        return data
+            except:
+                continue
+        
+        # If all fail, try archive approach
+        return get_products_from_archive(chain_name, limit)
+        
+    except Exception as e:
+        print(f"   ❌ Error fetching products: {e}")
+        return []
+
+def get_products_from_archive(chain_name, limit=500):
+    """Fallback: get products from archive data"""
+    try:
+        # Get latest archive info
+        response = requests.get(f"{BASE_URL}/v0/list", timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("archives"):
+                archive_url = data["archives"][0]["url"]
+                print(f"   📦 Using archive: {archive_url}")
+                
+                # Download and parse archive (simplified)
+                # For now, return empty to avoid complexity
+                return []
+    except:
+        pass
     
-    for endpoint in endpoints:
-        try:
-            response = requests.get(f"https://api.cijene.dev{endpoint}", timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                if data:
-                    return data
-        except:
-            continue
-    
-    # If API fails, return empty
-    print(f"   ⚠️ No products found for {chain_name}")
     return []
 
 def upsert_products(products):
@@ -199,7 +205,7 @@ def upsert_prices(products, chain_name):
 def main():
     """Main sync function"""
     print("\n" + "="*60)
-    print("Starting MCP-based sync...")
+    print("Starting Cijene API sync...")
     print("="*60)
     
     # Get chains
@@ -212,8 +218,11 @@ def main():
     print(f"✅ Found {len(chains)} chains to process")
     
     # Process each chain
+    total_products = 0
+    total_prices = 0
+    
     for idx, chain in enumerate(chains, 1):
-        chain_name = chain.get("name", chain.get("id", "Unknown")).upper()
+        chain_name = chain.get("name", chain.get("id", "Unknown"))
         
         print(f"\n{'='*50}")
         print(f"[{idx}/{len(chains)}] 🏪 Processing: {chain_name}")
@@ -221,7 +230,7 @@ def main():
         
         try:
             # Get products for this chain
-            products = get_products_by_chain(chain_name, limit=200)  # Start with 200 products
+            products = get_products_by_chain(chain_name, limit=500)
             
             if not products:
                 print(f"   ⚠️ No products found for {chain_name}")
@@ -231,10 +240,12 @@ def main():
             
             # Upsert products
             product_count = upsert_products(products)
+            total_products += product_count
             print(f"   ✅ Upserted {product_count} products")
             
             # Upsert prices
             price_count = upsert_prices(products, chain_name)
+            total_prices += price_count
             if price_count > 0:
                 print(f"   ✅ Upserted {price_count} prices")
             else:
@@ -248,7 +259,9 @@ def main():
             continue
     
     print("\n" + "="*60)
-    print("🏁 SYNC COMPLETE!")
+    print(f"🏁 SYNC COMPLETE!")
+    print(f"   Total products upserted: {total_products}")
+    print(f"   Total prices upserted: {total_prices}")
     print("="*60)
 
 if __name__ == "__main__":
