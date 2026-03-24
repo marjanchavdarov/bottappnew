@@ -34,37 +34,49 @@ def db_headers():
 
 def sanitize_num(val):
     """
-    Advanced Cleaner:
-    1. Replaces comma with dot.
-    2. Extracts only the first numeric group (e.g., '12 L' -> '12', 'Price: 5.99 kn' -> '5.99').
-    3. Prevents JSON 'Out of Range' errors.
+    Enterprise-grade cleaner:
+    1. Fixes '0,50' -> 0.50
+    2. Fixes '12 L' -> 12.0
+    3. Drops NaN/Infinity to keep JSON compliant.
     """
-    if pd.isna(val) or val == "": return None
+    if pd.isna(val) or val == "" or val is None: 
+        return None
     try:
-        # Convert to string and swap comma for dot
         s = str(val).replace(',', '.')
-        # Find the first sequence of digits and dots (the actual number)
+        # Regex: finds the first number (integer or float) in the string
         match = re.search(r"[-+]?\d*\.\d+|\d+", s)
         if match:
             f = float(match.group())
-            if math.isnan(f) or math.isinf(f): return None
+            if math.isnan(f) or math.isinf(f): 
+                return None
             return f
         return None
     except:
         return None
 
-def bulk_upsert(table, data, batch_size=1000):
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
+def bulk_upsert(table, data, batch_size=500):
+    """
+    Uses 'on_conflict' to handle duplicate errors (23505).
+    Instead of failing, it will update the existing row.
+    """
+    if not data: return True
+    
+    # Conflict targets: Product is Barcode. Price is Barcode + Store + Date.
+    target = "barcode,store,price_date" if table == "store_prices" else "barcode"
+    url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={target}"
+    
+    headers = db_headers()
     success = True
+    
     for i in range(0, len(data), batch_size):
         batch = data[i:i + batch_size]
         try:
-            r = requests.post(url, headers=db_headers(), json=batch, timeout=60)
+            r = requests.post(url, headers=headers, json=batch, timeout=60)
             if r.status_code >= 400:
                 print(f"❌ {table} Error: {r.text}")
                 success = False
         except Exception as e:
-            print(f"❌ Request Failed: {e}")
+            print(f"❌ Request failed: {e}")
             success = False
     return success
 
@@ -79,16 +91,15 @@ def process_master_zip(zip_path):
             total_stores = len(store_folders)
 
             for i, store in enumerate(store_folders):
-                # UI Update: Phase 1
                 progress_status = {
-                    "msg": f"🛠️ Cleaning {store.upper()} Barcodes...",
+                    "msg": f"🛠️ Processing {store.upper()}...",
                     "percent": int((i / total_stores) * 100)
                 }
 
                 req = {'p': f"{store}/products.csv", 'r': f"{store}/prices.csv", 's': f"{store}/stores.csv"}
                 if not all(f in all_files for f in req.values()): continue
 
-                # --- STEP 1: PRODUCTS (IDENTITY LAYER) ---
+                # 1. LOAD & CLEAN PRODUCTS
                 df_p = pd.read_csv(z.open(req['p']), dtype={'barcode': str})
                 df_p['barcode'] = df_p['barcode'].astype(str).apply(lambda x: x.split('.')[0].strip())
                 
@@ -99,13 +110,11 @@ def process_master_zip(zip_path):
                 existing_p = [c for c in p_cols if c in df_p.columns]
                 master_data = df_p[existing_p].dropna(subset=['barcode']).drop_duplicates('barcode').to_dict('records')
                 
-                # STRICT SEQUENCE: Upload products first
                 if bulk_upsert("master_products", master_data):
                     del master_data
                     gc.collect()
 
-                    # --- STEP 2: PRICES (TRANSACTION LAYER) ---
-                    progress_status["msg"] = f"💰 Syncing {store.upper()} Prices..."
+                    # 2. LOAD & CLEAN PRICES
                     df_r = pd.read_csv(z.open(req['r']))
                     df_s = pd.read_csv(z.open(req['s']))
 
@@ -134,7 +143,7 @@ def process_master_zip(zip_path):
                 del df_p
                 gc.collect()
 
-            progress_status = {"msg": "✅ All Data Synced Cleanly!", "percent": 100}
+            progress_status = {"msg": "✅ Sync Finished Cleanly!", "percent": 100}
 
     except Exception as e:
         progress_status = {"msg": f"❌ Error: {str(e)}", "percent": 0}
@@ -142,27 +151,28 @@ def process_master_zip(zip_path):
         if os.path.exists(zip_path): os.remove(zip_path)
         gc.collect()
 
-# --- ROUTES REMAIN THE SAME AS BEFORE ---
+# --- WEB UI & ROUTES ---
 HTML_PAGE = """
-<!DOCTYPE html><html><head><title>Katalog Ingest</title>
+<!DOCTYPE html><html><head><title>Katalog Sync</title>
 <style>
-    body { font-family: sans-serif; background: #f7fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-    .card { background: white; padding: 2rem; border-radius: 15px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 400px; text-align: center; }
-    .progress-box { background: #edf2f7; border-radius: 10px; height: 12px; margin: 20px 0; overflow: hidden; }
-    #bar { background: #48bb78; width: 0%; height: 100%; transition: width 0.4s; }
-    button { background: #4299e1; color: white; border: none; padding: 12px; width: 100%; border-radius: 8px; cursor: pointer; font-weight: bold; }
+    body { font-family: sans-serif; background: #f0f4f8; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    .card { background: white; padding: 2.5rem; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 450px; text-align: center; }
+    .progress-box { background: #e2e8f0; border-radius: 10px; height: 15px; margin: 25px 0; overflow: hidden; }
+    #bar { background: #48bb78; width: 0%; height: 100%; transition: width 0.3s ease; }
+    button { background: #3182ce; color: white; border: none; padding: 15px; width: 100%; border-radius: 10px; cursor: pointer; font-size: 16px; font-weight: 600; }
+    button:disabled { background: #a0aec0; }
 </style></head>
 <body><div class="card">
-    <h2>🚀 Katalog.ai Sync</h2>
-    <form id="uForm"><input type="file" id="fIn" accept=".zip"><br><br><button type="submit" id="sBtn">Start Sync</button></form>
+    <h2 style="color: #2d3748;">🚀 Katalog.ai Master Sync</h2>
+    <form id="uForm"><input type="file" id="fIn" accept=".zip" style="margin-bottom: 20px;"><br><button type="submit" id="sBtn">Start Data Ingest</button></form>
     <div class="progress-box"><div id="bar"></div></div>
-    <div id="status">Ready</div>
+    <div id="status" style="font-weight: 500; color: #4a5568;">Waiting for file...</div>
 </div>
 <script>
     const form = document.getElementById('uForm'), bar = document.getElementById('bar'), status = document.getElementById('status'), btn = document.getElementById('sBtn');
     form.onsubmit = async (e) => {
         e.preventDefault(); const file = document.getElementById('fIn').files[0]; if(!file) return;
-        btn.disabled = true; status.innerText = "Uploading ZIP...";
+        btn.disabled = true; status.innerText = "Uploading to server...";
         const formData = new FormData(); formData.append('file', file);
         const uploadResp = await fetch('/upload', { method: 'POST', body: formData });
         if (uploadResp.ok) {
