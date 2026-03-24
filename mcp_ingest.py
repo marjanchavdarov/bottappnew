@@ -4,36 +4,36 @@ import json
 import time
 from datetime import date
 from dotenv import load_dotenv
-from supabase import create_client, Client
-from typing import List, Dict, Any
-import logging
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+from supabase import create_client
 
 load_dotenv()
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 MCP_URL = "https://api.cijene.dev/mcp"
 
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+print("=" * 60)
+print("🌍 MCP Price Sync Started")
+print("=" * 60)
 
-# Configuration
-BATCH_SIZE_PRODUCTS = 500
-BATCH_SIZE_PRICES = 200
-PAGE_SIZE = 100
-MAX_PAGES_PER_CHAIN = 100  # 10,000 products per chain max
-DELAY_BETWEEN_CALLS = 0.5  # seconds
-DELAY_BETWEEN_CHAINS = 2  # seconds
+# Check credentials
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("❌ ERROR: Missing Supabase credentials")
+    print("Make sure SUPABASE_URL and SUPABASE_KEY are set in GitHub Secrets")
+    exit(1)
 
-def call_mcp_tool(tool_name: str, arguments: Dict = None) -> List[Dict]:
-    """Call MCP server tool with error handling and rate limiting"""
+print(f"✅ Supabase URL: {SUPABASE_URL}")
+print(f"✅ MCP URL: {MCP_URL}")
+
+# Initialize Supabase
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Supabase client initialized")
+except Exception as e:
+    print(f"❌ Failed to initialize Supabase: {e}")
+    exit(1)
+
+def call_mcp_tool(tool_name, arguments=None):
+    """Call MCP server tool"""
     if arguments is None:
         arguments = {}
     
@@ -48,22 +48,23 @@ def call_mcp_tool(tool_name: str, arguments: Dict = None) -> List[Dict]:
     }
     
     try:
-        # Rate limiting
-        time.sleep(DELAY_BETWEEN_CALLS)
-        
+        time.sleep(0.5)  # Rate limiting
         response = requests.post(MCP_URL, json=payload, timeout=30)
-        response.raise_for_status()
+        
+        if response.status_code != 200:
+            print(f"   ⚠️ MCP returned {response.status_code}")
+            return []
+        
         result = response.json()
         
         if "error" in result:
-            logger.error(f"MCP Error: {result['error']}")
+            print(f"   ❌ MCP Error: {result['error']}")
             return []
         
-        # Parse the response content
+        # Parse content
         content = result.get("result", {}).get("content", [])
-        
-        # Extract text from content
         data = []
+        
         for item in content:
             if item.get("type") == "text":
                 try:
@@ -73,317 +74,183 @@ def call_mcp_tool(tool_name: str, arguments: Dict = None) -> List[Dict]:
                     else:
                         data.append(parsed)
                 except json.JSONDecodeError:
-                    data.append({"text": item["text"]})
+                    pass
         
         return data
         
     except requests.exceptions.Timeout:
-        logger.error(f"MCP timeout for {tool_name}")
+        print(f"   ⏰ Timeout calling {tool_name}")
         return []
     except Exception as e:
-        logger.error(f"MCP call failed for {tool_name}: {e}")
+        print(f"   ❌ Error calling {tool_name}: {e}")
         return []
 
-def get_all_chains() -> List[Dict]:
-    """Get list of all retail chains"""
-    logger.info("Fetching chains from MCP...")
-    chains = call_mcp_tool("list_chains")
-    logger.info(f"Found {len(chains)} chains")
-    return chains
-
-def get_chain_stats(chain_name: str) -> Dict:
-    """Get statistics for a chain"""
-    stats = call_mcp_tool("get_stats", {"chain": chain_name})
-    return stats[0] if stats else {}
-
-def get_chain_stores(chain_name: str) -> List[Dict]:
-    """Get all stores for a chain"""
-    stores = call_mcp_tool("list_chain_stores", {"chain": chain_name})
-    return stores
-
-def search_products_by_chain(chain_name: str, limit: int = 100, offset: int = 0) -> List[Dict]:
-    """Search products for a specific chain with pagination"""
-    products = call_mcp_tool("search_products", {
-        "query": "",
-        "chain": chain_name,
-        "limit": limit,
-        "offset": offset
-    })
-    return products
-
-def get_product_by_ean(ean: str) -> List[Dict]:
-    """Get product details by EAN/barcode"""
-    products = call_mcp_tool("get_products_by_ean", {"ean": ean})
-    return products
-
-def upsert_products(products: List[Dict]) -> int:
-    """Upsert products to master_products table"""
-    if not products or not supabase:
+def upsert_products(products):
+    """Upsert products to Supabase"""
+    if not products:
         return 0
     
     records = []
     for p in products:
-        record = {
-            "barcode": p.get("ean", ""),
-            "name": p.get("name", ""),
-            "brand": p.get("brand", ""),
-            "category": p.get("category", "")
-        }
-        if record["barcode"]:
-            records.append(record)
+        ean = p.get("ean", "")
+        if ean:
+            records.append({
+                "barcode": ean,
+                "name": p.get("name", ""),
+                "brand": p.get("brand", ""),
+                "category": p.get("category", "")
+            })
     
     if not records:
         return 0
     
-    # Deduplicate by barcode
-    unique_records = {r["barcode"]: r for r in records}.values()
-    unique_list = list(unique_records)
+    # Remove duplicates by barcode
+    unique = {}
+    for r in records:
+        unique[r["barcode"]] = r
+    unique_list = list(unique.values())
     
+    # Upsert in batches
+    batch_size = 500
     total = 0
-    for i in range(0, len(unique_list), BATCH_SIZE_PRODUCTS):
-        batch = unique_list[i:i+BATCH_SIZE_PRODUCTS]
+    
+    for i in range(0, len(unique_list), batch_size):
+        batch = unique_list[i:i+batch_size]
         try:
-            supabase.table("master_products").upsert(
-                batch, 
-                on_conflict="barcode"
-            ).execute()
+            supabase.table("master_products").upsert(batch).execute()
             total += len(batch)
             if total % 1000 == 0:
-                logger.info(f"      Upserted {total} products")
+                print(f"      📦 Upserted {total} products")
         except Exception as e:
-            logger.error(f"      Product upsert error: {e}")
+            print(f"      ❌ Product upsert error: {e}")
     
     return total
 
-def upsert_prices(prices: List[Dict]) -> int:
-    """Upsert prices to store_prices table"""
-    if not prices or not supabase:
+def upsert_prices(prices):
+    """Upsert prices to Supabase"""
+    if not prices:
         return 0
     
-    records = []
     today = date.today().isoformat()
+    records = []
     
     for p in prices:
-        if p.get("price") and p.get("barcode"):
+        barcode = p.get("barcode")
+        price_val = p.get("price")
+        store = p.get("store")
+        
+        if barcode and price_val and store:
             try:
-                price_value = float(p.get("price", 0))
-                if price_value > 0:
-                    record = {
-                        "barcode": p.get("barcode"),
-                        "store": p.get("store", ""),
+                price_float = float(price_val)
+                if price_float > 0:
+                    records.append({
+                        "barcode": barcode,
+                        "store": store,
                         "price_date": today,
-                        "current_price": price_value
-                    }
-                    records.append(record)
+                        "current_price": price_float
+                    })
             except (ValueError, TypeError):
-                continue
+                pass
     
     if not records:
         return 0
     
-    # Deduplicate
-    unique_records = {}
+    # Remove duplicates
+    unique = {}
     for r in records:
         key = f"{r['barcode']}_{r['store']}_{r['price_date']}"
-        unique_records[key] = r
+        unique[key] = r
+    unique_list = list(unique.values())
     
-    unique_list = list(unique_records.values())
-    
+    # Upsert in small batches
+    batch_size = 200
     total = 0
-    for i in range(0, len(unique_list), BATCH_SIZE_PRICES):
-        batch = unique_list[i:i+BATCH_SIZE_PRICES]
+    
+    for i in range(0, len(unique_list), batch_size):
+        batch = unique_list[i:i+batch_size]
         try:
-            supabase.table("store_prices").upsert(
-                batch,
-                on_conflict="barcode,store,price_date"
-            ).execute()
+            supabase.table("store_prices").upsert(batch).execute()
             total += len(batch)
-            
             if total % 1000 == 0:
-                logger.info(f"      Upserted {total} prices")
-                
+                print(f"      💰 Upserted {total} prices")
         except Exception as e:
-            logger.error(f"      Price upsert error: {e}")
-            # If batch fails, try even smaller batches
+            print(f"      ❌ Price upsert error: {e}")
+            # Try smaller batches if failed
             if len(batch) > 50:
-                logger.info(f"      Retrying in smaller batches...")
                 for sub_batch in [batch[j:j+50] for j in range(0, len(batch), 50)]:
                     try:
-                        supabase.table("store_prices").upsert(
-                            sub_batch,
-                            on_conflict="barcode,store,price_date"
-                        ).execute()
+                        supabase.table("store_prices").upsert(sub_batch).execute()
                         total += len(sub_batch)
-                    except Exception as sub_e:
-                        logger.error(f"      Sub-batch failed: {sub_e}")
+                    except:
+                        pass
     
     return total
 
-def sync_chain_complete(chain_name: str):
-    """Sync complete data for a single chain"""
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Processing chain: {chain_name}")
-    logger.info(f"{'='*60}")
+def main():
+    print("\n📡 Fetching chains from MCP...")
+    chains = call_mcp_tool("list_chains")
     
-    try:
-        # Get stats
-        stats = get_chain_stats(chain_name)
-        if stats:
-            logger.info(f"Stats: {json.dumps(stats, indent=2)}")
+    if not chains:
+        print("❌ No chains found")
+        return
+    
+    print(f"✅ Found {len(chains)} chains")
+    
+    # Process each chain
+    for idx, chain in enumerate(chains, 1):
+        chain_name = chain.get("name", chain.get("id", "Unknown"))
+        print(f"\n{'='*50}")
+        print(f"[{idx}/{len(chains)}] 🏪 Processing: {chain_name}")
+        print(f"{'='*50}")
         
-        # Get stores
-        stores = get_chain_stores(chain_name)
-        logger.info(f"Found {len(stores)} stores")
-        
-        # Store store info in Supabase (optional)
-        store_count = 0
-        for store in stores:
-            try:
-                supabase.table("stores").upsert({
-                    "store_id": store.get("id", store.get("name")),
-                    "chain": chain_name,
-                    "name": store.get("name"),
-                    "city": store.get("city", ""),
-                    "address": store.get("address", ""),
-                    "lat": store.get("lat"),
-                    "lng": store.get("lng")
-                }, on_conflict="store_id").execute()
-                store_count += 1
-            except Exception as e:
-                logger.debug(f"Store upsert error: {e}")
-        
-        logger.info(f"Upserted {store_count} stores")
-        
-        # Fetch all products with pagination
-        all_products = []
-        offset = 0
-        
-        logger.info(f"Fetching products (max {MAX_PAGES_PER_CHAIN * PAGE_SIZE} products)...")
-        
-        while offset < MAX_PAGES_PER_CHAIN * PAGE_SIZE:
-            products = search_products_by_chain(chain_name, PAGE_SIZE, offset)
+        try:
+            # Fetch products (limit to 500 for testing, remove limit for full sync)
+            print(f"   🔍 Fetching products...")
+            products = call_mcp_tool("search_products", {
+                "query": "",
+                "chain": chain_name,
+                "limit": 500  # Increase this for full sync
+            })
             
             if not products:
-                break
+                print(f"   ⚠️ No products found for {chain_name}")
+                continue
             
-            all_products.extend(products)
-            logger.info(f"   Fetched {len(products)} products (total: {len(all_products)})")
+            print(f"   📦 Found {len(products)} products")
             
-            offset += PAGE_SIZE
+            # Upsert products
+            product_count = upsert_products(products)
+            print(f"   ✅ Upserted {product_count} products")
             
-            # Rate limiting
-            time.sleep(DELAY_BETWEEN_CALLS)
-        
-        # Upsert products
-        if all_products:
-            logger.info(f"Upserting {len(all_products)} products...")
-            product_count = upsert_products(all_products)
-            logger.info(f"✅ Upserted {product_count} products")
-            
-            # Extract and upsert prices
+            # Extract prices
             prices = []
-            for p in all_products:
-                if p.get("prices"):
+            for p in products:
+                ean = p.get("ean")
+                if ean and p.get("prices"):
                     for price_info in p["prices"]:
                         prices.append({
-                            "barcode": p.get("ean"),
+                            "barcode": ean,
                             "store": f"{chain_name} - {price_info.get('store_name', '')}",
                             "price": price_info.get("price")
                         })
             
             if prices:
-                logger.info(f"Upserting {len(prices)} prices...")
+                print(f"   💰 Found {len(prices)} prices")
                 price_count = upsert_prices(prices)
-                logger.info(f"✅ Upserted {price_count} prices")
-        
-        logger.info(f"✅ Chain {chain_name} completed successfully")
-        
-    except Exception as e:
-        logger.error(f"Error syncing {chain_name}: {e}")
-
-def sync_specific_barcodes(barcodes: List[str]):
-    """Sync specific products by barcode"""
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Syncing {len(barcodes)} specific barcodes...")
-    logger.info(f"{'='*60}")
+                print(f"   ✅ Upserted {price_count} prices")
+            else:
+                print(f"   ⚠️ No prices found")
+            
+            # Rate limiting between chains
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"   ❌ Error processing {chain_name}: {e}")
+            continue
     
-    all_products = []
-    for barcode in barcodes:
-        products = get_product_by_ean(barcode)
-        if products:
-            all_products.extend(products)
-            logger.info(f"✅ Found product for {barcode}")
-        else:
-            logger.warning(f"⚠️ No product found for {barcode}")
-        
-        time.sleep(DELAY_BETWEEN_CALLS)
-    
-    if all_products:
-        logger.info(f"Upserting {len(all_products)} products...")
-        upsert_products(all_products)
-        
-        # Extract prices
-        prices = []
-        for p in all_products:
-            if p.get("prices"):
-                for price_info in p["prices"]:
-                    prices.append({
-                        "barcode": p.get("ean"),
-                        "store": f"{price_info.get('chain', '')} - {price_info.get('store_name', '')}",
-                        "price": price_info.get("price")
-                    })
-        
-        if prices:
-            logger.info(f"Upserting {len(prices)} prices...")
-            upsert_prices(prices)
-
-def main():
-    """Main function to run the sync"""
-    logger.info("="*60)
-    logger.info("🌍 Starting MCP-based data sync")
-    logger.info("="*60)
-    start_time = time.time()
-    
-    # Check credentials
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("❌ Missing Supabase credentials")
-        logger.error("Please set SUPABASE_URL and SUPABASE_KEY in environment variables")
-        return
-    
-    if not supabase:
-        logger.error("❌ Failed to initialize Supabase client")
-        return
-    
-    logger.info(f"✅ Supabase URL: {SUPABASE_URL}")
-    logger.info(f"✅ MCP URL: {MCP_URL}")
-    
-    # Get all chains
-    chains = get_all_chains()
-    
-    if not chains:
-        logger.error("❌ No chains found from MCP")
-        return
-    
-    logger.info(f"\n📊 Found {len(chains)} chains to process:")
-    for chain in chains:
-        chain_name = chain.get("name", chain.get("id", "Unknown"))
-        logger.info(f"   - {chain_name}")
-    
-    # Sync all chains
-    logger.info(f"\n🔄 Syncing all chains...")
-    
-    for chain in chains:
-        chain_name = chain.get("name", chain.get("id"))
-        if chain_name:
-            sync_chain_complete(chain_name)
-        
-        # Add delay between chains
-        time.sleep(DELAY_BETWEEN_CHAINS)
-    
-    elapsed = time.time() - start_time
-    logger.info("\n" + "="*60)
-    logger.info(f"🏁 SYNC COMPLETE! (took {elapsed/60:.1f} minutes)")
-    logger.info("="*60)
+    print("\n" + "=" * 60)
+    print("🏁 MCP SYNC COMPLETE!")
+    print("=" * 60)
 
 if __name__ == "__main__":
     main()
