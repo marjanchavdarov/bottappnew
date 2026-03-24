@@ -1,0 +1,16 @@
+name: Daily Price & Location Sync
+on:
+  schedule:
+    - cron: '0 10 * * *' # Runs every day at 10:00 AM
+  workflow_dispatch: # Allows you to run it manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Run Ingest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python your_script.py
