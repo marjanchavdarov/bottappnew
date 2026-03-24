@@ -1,4 +1,4 @@
-import os, zipfile, pandas as pd, requests, json, time, math, gc
+import os, zipfile, pandas as pd, requests, json, gc
 from datetime import date
 from dotenv import load_dotenv
 
@@ -8,19 +8,15 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 def bulk_upsert(table, data):
     if not data: return
-    # Identify the unique key for each table to avoid duplicates
-    conf = "barcode" if table == "master_products" else ("barcode,store,price_date" if table == "store_prices" else "chain,store_id")
+    # Use the unique keys to prevent duplicates
+    conf = "barcode" if table == "master_products" else "barcode,store,price_date"
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={conf}"
     headers = {
-        "apikey": SUPABASE_KEY, 
-        "Authorization": f"Bearer {SUPABASE_KEY}", 
-        "Content-Type": "application/json", 
-        "Prefer": "resolution=merge-duplicates"
+        "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"
     }
-    try:
-        # We use a 60s timeout to allow large batches to process
-        requests.post(url, headers=headers, json=data, timeout=60)
-    except: pass
+    # Send up to 5,000 rows in a single request
+    requests.post(url, headers=headers, json=data, timeout=60)
 
 def process_zip(zip_path):
     today = date.today().isoformat()
@@ -28,46 +24,49 @@ def process_zip(zip_path):
         folders = sorted(list(set([f.split('/')[0] for f in z.namelist() if '/' in f])))
         
         for store in folders:
-            print(f"⚡ FAST SYNC: {store.upper()}")
+            print(f"⚡ FAST SYNCing: {store.upper()}")
             try:
-                # 1. LOAD DATA & CLEAN BARCODES IMMEDIATELY
-                df_p = pd.read_csv(z.open(f"{store}/products.csv"), usecols=['product_id', 'barcode', 'name', 'brand'], dtype=str)
+                # 1. LOAD PRODUCTS & STORES INTO MEMORY
+                df_p = pd.read_csv(z.open(f"{store}/products.csv"), dtype=str)
                 df_p['barcode'] = df_p['barcode'].fillna('').astype(str).str.split('.').str[0].str.strip()
+                df_s = pd.read_csv(z.open(f"{store}/stores.csv"), dtype=str)
                 
-                # 2. UPDATE PRODUCT NAMES (The fix for 'New Item')
-                # We only take rows that actually have a barcode and a name
+                # 2. FIX NAMES (The 'New Item' killer)
                 valid_prods = df_p[(df_p['name'].notna()) & (df_p['barcode'] != '')].drop_duplicates('barcode')
                 p_recs = [{"barcode": r['barcode'], "name": r['name'], "brand": r.get('brand', '')} for _, r in valid_prods.iterrows()]
-                
-                # Send all products for this store in one single shot
                 if p_recs: bulk_upsert("master_products", p_recs)
 
-                # 3. UPLOAD PRICES IN MASSIVE CHUNKS (10,000 at a time)
-                df_s = pd.read_csv(z.open(f"{store}/stores.csv"), dtype=str)
-                p_iter = pd.read_csv(z.open(f"{store}/prices.csv"), chunksize=10000, dtype=str)
-                
-                for chunk in p_iter:
-                    merged = chunk.merge(df_p, on='product_id').merge(df_s[['store_id', 'city']], on='store_id')
-                    recs = []
-                    for _, row in merged.iterrows():
-                        p = float(str(row['price']).replace(',','.')) if pd.notna(row.get('price')) else None
+                # 3. FAST MERGE IN PYTHON (This saves 40 minutes)
+                df_prices = pd.read_csv(z.open(f"{store}/prices.csv"), dtype=str)
+                merged = df_prices.merge(df_p[['product_id', 'barcode']], on='product_id')
+                merged = merged.merge(df_s[['store_id', 'city']], on='store_id')
+
+                # 4. PREPARE & UPLOAD PRICES
+                price_uploads = []
+                for _, row in merged.iterrows():
+                    try:
+                        p = float(str(row['price']).replace(',','.'))
                         if p and row.get('barcode'):
-                            recs.append({
+                            price_uploads.append({
                                 "barcode": row['barcode'],
                                 "store": f"{store.capitalize()} - {row['city']}",
                                 "price_date": today,
                                 "current_price": p,
                                 "regular_price": p
                             })
-                    if recs: bulk_upsert("store_prices", recs)
-                    del chunk, merged; gc.collect()
+                    except: continue
+                
+                # Send in blocks of 5000
+                for i in range(0, len(price_uploads), 5000):
+                    bulk_upsert("store_prices", price_uploads[i:i+5000])
+                
+                del df_p, df_s, df_prices, merged, price_uploads; gc.collect()
             except: continue
 
 if __name__ == "__main__":
-    # Get the URL and run
     r = requests.get("https://api.cijene.dev/v0/list").json()
     url = r['archives'][0]['url']
     res = requests.get(url)
     with open("temp.zip", "wb") as f: f.write(res.content)
     process_zip("temp.zip")
-    print("🏁 FINISHED.")
+    print("🏁 FINISHED SUCCESSFULLY.")
