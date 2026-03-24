@@ -1,16 +1,29 @@
 name: Daily Price & Location Sync
+
 on:
   schedule:
-    - cron: '0 10 * * *' # Runs every day at 10:00 AM
-  workflow_dispatch: # Allows you to run it manually
+    - cron: '0 10 * * *' # 11:00 AM Croatia time
+  workflow_dispatch: # Allows manual "Run workflow" button
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas requests python-dotenv
+
       - name: Run Ingest
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python your_script.py
+        # CRITICAL: This must match the filename in your screenshot
+        run: python auto_ingest.py
