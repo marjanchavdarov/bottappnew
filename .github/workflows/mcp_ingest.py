@@ -2,18 +2,8 @@ name: MCP Price Sync
 
 on:
   schedule:
-    # Run daily at 2:00 AM
     - cron: '0 2 * * *'
-  workflow_dispatch:  # Allow manual trigger
-    inputs:
-      sync_type:
-        description: 'Sync type (all or specific)'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - specific
+  workflow_dispatch:
 
 jobs:
   sync:
@@ -26,13 +16,28 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-        cache: 'pip'
+        python-version: '3.11'
     
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install python-dotenv requests supabase
+    
+    - name: Test MCP connection
+      run: |
+        python -c "
+import requests
+import json
+print('Testing MCP connection...')
+r = requests.post('https://api.cijene.dev/mcp', json={'jsonrpc':'2.0','method':'tools/list','id':1}, timeout=10)
+print(f'Status: {r.status_code}')
+if r.status_code == 200:
+    data = r.json()
+    tools = data.get('result', {}).get('tools', [])
+    print(f'✅ Found {len(tools)} tools')
+else:
+    print('❌ Failed')
+"
     
     - name: Run MCP sync
       env:
@@ -48,5 +53,4 @@ jobs:
         name: sync-logs
         path: |
           *.log
-          mcp_ingest.log
         retention-days: 7
