@@ -76,32 +76,42 @@ def process_master_zip(zip_path):
                 req = {'p': f"{store}/products.csv", 'r': f"{store}/prices.csv", 's': f"{store}/stores.csv"}
                 if not all(f in all_files for f in req.values()): continue
 
-                # --- MEMORY EFFICIENT LOADING ---
-                # 1. Sync Products (Identity Layer)
+                # 1. Load and Sync Products (The "Master" table)
                 df_p = pd.read_csv(z.open(req['p']), dtype={'barcode': str})
                 p_cols = ['barcode', 'name', 'brand', 'category', 'unit', 'quantity']
                 existing_p = [c for c in p_cols if c in df_p.columns]
+                
+                # Clean barcodes to remove .0 and whitespace
+                df_p['barcode'] = df_p['barcode'].astype(str).apply(lambda x: x.split('.')[0].strip())
+                
                 master_data = df_p[existing_p].dropna(subset=['barcode']).drop_duplicates('barcode').to_dict('records')
                 bulk_upsert("master_products", master_data)
-                del master_data # Free RAM
+                del master_data
+
+                # --- CRITICAL PAUSE ---
+                # This gives Supabase time to index the barcodes before we send prices
+                time.sleep(2) 
 
                 # 2. Load Prices and Stores
                 df_r = pd.read_csv(z.open(req['r']))
                 df_s = pd.read_csv(z.open(req['s']))
 
-                # 3. Merge
+                # 3. Merge Data
                 merged = df_r.merge(df_p[['product_id', 'barcode']], on='product_id')
                 merged = merged.merge(df_s[['store_id', 'city']], on='store_id')
                 
-                # Free the individual DFs now that we have 'merged'
+                # Free memory from raw dataframes
                 del df_p, df_r, df_s
-                gc.collect() 
+                gc.collect()
 
                 price_records = []
                 for _, row in merged.iterrows():
                     curr_p = clean_float(row['price'])
+                    # Ensure price barcode matches the cleaned product barcode
+                    clean_bc = str(row['barcode']).split('.')[0].strip()
+                    
                     price_records.append({
-                        "barcode":       str(row['barcode']),
+                        "barcode":       clean_bc,
                         "store":         f"{store.capitalize()} - {row['store_id']} ({row['city']})",
                         "price_date":    today,
                         "current_price": curr_p,
@@ -110,11 +120,12 @@ def process_master_zip(zip_path):
                         "is_on_sale":    pd.notna(row['special_price'])
                     })
                 
+                # 4. Upload Prices (The "Timeline" table)
                 bulk_upsert("store_prices", price_records)
                 
-                # --- CRITICAL: CLEAR MEMORY AFTER EACH STORE ---
+                # Clean up memory after each store folder
                 del merged, price_records
-                gc.collect() 
+                gc.collect()
 
             progress_status = {"msg": "✅ Sync Complete!", "percent": 100}
 
