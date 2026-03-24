@@ -33,41 +33,53 @@ def db_headers():
     }
 
 def sanitize_num(val):
-    """
-    Enterprise-grade cleaner:
-    1. Fixes '0,50' -> 0.50
-    2. Fixes '12 L' -> 12.0
-    3. Drops NaN/Infinity to keep JSON compliant.
-    """
-    if pd.isna(val) or val == "" or val is None: 
-        return None
+    """Basic numeric cleaner for raw digits and European commas."""
+    if pd.isna(val) or val == "" or val is None: return None
     try:
         s = str(val).replace(',', '.')
-        # Regex: finds the first number (integer or float) in the string
         match = re.search(r"[-+]?\d*\.\d+|\d+", s)
         if match:
             f = float(match.group())
-            if math.isnan(f) or math.isinf(f): 
-                return None
+            if math.isnan(f) or math.isinf(f): return None
             return f
         return None
-    except:
-        return None
+    except: return None
+
+def extract_from_name(row):
+    """
+    The Brain: Parses '125 g', '12 L', and '10/1' from the product name.
+    """
+    name_str = str(row.get('name', ''))
+    
+    # 1. Handle Multi-packs (e.g., '10/1', '2/1', '12/1')
+    # This finds the number before the slash if it's a count
+    multi_match = re.search(r"(\d+)/1\b", name_str)
+    
+    # 2. Handle Units (g, kg, l, ml)
+    # This finds 125 in '125 g' or 12 in '12L'
+    unit_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(g|l|ml|kg|kom)\b", name_str, re.IGNORECASE)
+    
+    if unit_match:
+        val = sanitize_num(unit_match.group(1))
+        unit = unit_match.group(2).lower()
+        if val:
+            # Normalize: Grams and Milliliters become 0.xxx (Standard Retail Unit)
+            if unit in ['g', 'ml']:
+                return val / 1000
+            return val
+            
+    if multi_match:
+        return sanitize_num(multi_match.group(1))
+
+    # Fallback to existing quantity column if name yields nothing
+    return sanitize_num(row.get('quantity'))
 
 def bulk_upsert(table, data, batch_size=500):
-    """
-    Uses 'on_conflict' to handle duplicate errors (23505).
-    Instead of failing, it will update the existing row.
-    """
     if not data: return True
-    
-    # Conflict targets: Product is Barcode. Price is Barcode + Store + Date.
     target = "barcode,store,price_date" if table == "store_prices" else "barcode"
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict={target}"
-    
     headers = db_headers()
     success = True
-    
     for i in range(0, len(data), batch_size):
         batch = data[i:i + batch_size]
         try:
@@ -76,14 +88,13 @@ def bulk_upsert(table, data, batch_size=500):
                 print(f"❌ {table} Error: {r.text}")
                 success = False
         except Exception as e:
-            print(f"❌ Request failed: {e}")
+            print(f"❌ Connection error: {e}")
             success = False
     return success
 
 def process_master_zip(zip_path):
     global progress_status
     today = date.today().isoformat()
-    
     try:
         with zipfile.ZipFile(zip_path, 'r') as z:
             all_files = z.namelist()
@@ -91,20 +102,15 @@ def process_master_zip(zip_path):
             total_stores = len(store_folders)
 
             for i, store in enumerate(store_folders):
-                progress_status = {
-                    "msg": f"🛠️ Processing {store.upper()}...",
-                    "percent": int((i / total_stores) * 100)
-                }
-
+                progress_status = {"msg": f"🧠 Extracting {store.upper()}...", "percent": int((i / total_stores) * 100)}
                 req = {'p': f"{store}/products.csv", 'r': f"{store}/prices.csv", 's': f"{store}/stores.csv"}
                 if not all(f in all_files for f in req.values()): continue
 
-                # 1. LOAD & CLEAN PRODUCTS
                 df_p = pd.read_csv(z.open(req['p']), dtype={'barcode': str})
                 df_p['barcode'] = df_p['barcode'].astype(str).apply(lambda x: x.split('.')[0].strip())
                 
-                if 'quantity' in df_p.columns:
-                    df_p['quantity'] = df_p['quantity'].apply(sanitize_num)
+                # APPLY THE SMART EXTRACTION
+                df_p['quantity'] = df_p.apply(extract_from_name, axis=1)
 
                 p_cols = ['barcode', 'name', 'brand', 'category', 'unit', 'quantity']
                 existing_p = [c for c in p_cols if c in df_p.columns]
@@ -114,16 +120,11 @@ def process_master_zip(zip_path):
                     del master_data
                     gc.collect()
 
-                    # 2. LOAD & CLEAN PRICES
                     df_r = pd.read_csv(z.open(req['r']))
                     df_s = pd.read_csv(z.open(req['s']))
-
                     merged = df_r.merge(df_p[['product_id', 'barcode']], on='product_id')
                     merged = merged.merge(df_s[['store_id', 'city']], on='store_id')
                     
-                    del df_r, df_s
-                    gc.collect()
-
                     price_records = []
                     for _, row in merged.iterrows():
                         curr_p = sanitize_num(row['price'])
@@ -136,43 +137,37 @@ def process_master_zip(zip_path):
                             "sale_price":    sanitize_num(row['special_price']),
                             "is_on_sale":    pd.notna(row['special_price'])
                         })
-                    
                     bulk_upsert("store_prices", price_records)
-                    del merged, price_records
-                
                 del df_p
                 gc.collect()
-
-            progress_status = {"msg": "✅ Sync Finished Cleanly!", "percent": 100}
-
+            progress_status = {"msg": "✅ Intelligence Sync Complete!", "percent": 100}
     except Exception as e:
         progress_status = {"msg": f"❌ Error: {str(e)}", "percent": 0}
     finally:
         if os.path.exists(zip_path): os.remove(zip_path)
         gc.collect()
 
-# --- WEB UI & ROUTES ---
+# --- FLASK ROUTES REMAIN THE SAME ---
 HTML_PAGE = """
-<!DOCTYPE html><html><head><title>Katalog Sync</title>
+<!DOCTYPE html><html><head><title>Katalog AI Sync</title>
 <style>
-    body { font-family: sans-serif; background: #f0f4f8; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-    .card { background: white; padding: 2.5rem; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 450px; text-align: center; }
-    .progress-box { background: #e2e8f0; border-radius: 10px; height: 15px; margin: 25px 0; overflow: hidden; }
-    #bar { background: #48bb78; width: 0%; height: 100%; transition: width 0.3s ease; }
-    button { background: #3182ce; color: white; border: none; padding: 15px; width: 100%; border-radius: 10px; cursor: pointer; font-size: 16px; font-weight: 600; }
-    button:disabled { background: #a0aec0; }
+    body { font-family: sans-serif; background: #edf2f7; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    .card { background: white; padding: 2rem; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); width: 400px; text-align: center; }
+    .progress-box { background: #cbd5e0; border-radius: 10px; height: 12px; margin: 20px 0; overflow: hidden; }
+    #bar { background: #38a169; width: 0%; height: 100%; transition: width 0.3s; }
+    button { background: #2b6cb0; color: white; border: none; padding: 12px; width: 100%; border-radius: 10px; cursor: pointer; font-weight: bold; }
 </style></head>
 <body><div class="card">
-    <h2 style="color: #2d3748;">🚀 Katalog.ai Master Sync</h2>
-    <form id="uForm"><input type="file" id="fIn" accept=".zip" style="margin-bottom: 20px;"><br><button type="submit" id="sBtn">Start Data Ingest</button></form>
+    <h2>🤖 AI Ingest Active</h2>
+    <form id="uForm"><input type="file" id="fIn" accept=".zip"><br><br><button type="submit" id="sBtn">Sync Now</button></form>
     <div class="progress-box"><div id="bar"></div></div>
-    <div id="status" style="font-weight: 500; color: #4a5568;">Waiting for file...</div>
+    <div id="status">Ready</div>
 </div>
 <script>
     const form = document.getElementById('uForm'), bar = document.getElementById('bar'), status = document.getElementById('status'), btn = document.getElementById('sBtn');
     form.onsubmit = async (e) => {
         e.preventDefault(); const file = document.getElementById('fIn').files[0]; if(!file) return;
-        btn.disabled = true; status.innerText = "Uploading to server...";
+        btn.disabled = true; status.innerText = "Processing...";
         const formData = new FormData(); formData.append('file', file);
         const uploadResp = await fetch('/upload', { method: 'POST', body: formData });
         if (uploadResp.ok) {
