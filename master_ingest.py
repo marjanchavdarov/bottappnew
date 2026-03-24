@@ -6,6 +6,7 @@ import json
 import time
 import threading
 import math
+import gc 
 from flask import Flask, render_template_string, request, Response, stream_with_context
 from werkzeug.utils import secure_filename
 from datetime import date
@@ -54,6 +55,8 @@ def bulk_upsert(table, data, batch_size=1000):
             print(f"Batch failed: {e}")
 
 # 2. MAIN PROCESSOR
+
+
 def process_master_zip(zip_path):
     global progress_status
     today = date.today().isoformat()
@@ -73,37 +76,45 @@ def process_master_zip(zip_path):
                 req = {'p': f"{store}/products.csv", 'r': f"{store}/prices.csv", 's': f"{store}/stores.csv"}
                 if not all(f in all_files for f in req.values()): continue
 
+                # --- MEMORY EFFICIENT LOADING ---
+                # 1. Sync Products (Identity Layer)
                 df_p = pd.read_csv(z.open(req['p']), dtype={'barcode': str})
-                df_r = pd.read_csv(z.open(req['r']))
-                df_s = pd.read_csv(z.open(req['s']))
-
-                # Sync Products
                 p_cols = ['barcode', 'name', 'brand', 'category', 'unit', 'quantity']
                 existing_p = [c for c in p_cols if c in df_p.columns]
                 master_data = df_p[existing_p].dropna(subset=['barcode']).drop_duplicates('barcode').to_dict('records')
                 bulk_upsert("master_products", master_data)
+                del master_data # Free RAM
 
-                # Merge and Sync Prices
+                # 2. Load Prices and Stores
+                df_r = pd.read_csv(z.open(req['r']))
+                df_s = pd.read_csv(z.open(req['s']))
+
+                # 3. Merge
                 merged = df_r.merge(df_p[['product_id', 'barcode']], on='product_id')
                 merged = merged.merge(df_s[['store_id', 'city']], on='store_id')
                 
+                # Free the individual DFs now that we have 'merged'
+                del df_p, df_r, df_s
+                gc.collect() 
+
                 price_records = []
                 for _, row in merged.iterrows():
                     curr_p = clean_float(row['price'])
-                    anch_p = clean_float(row['anchor_price'])
-                    spec_p = clean_float(row['special_price'])
-
                     price_records.append({
                         "barcode":       str(row['barcode']),
                         "store":         f"{store.capitalize()} - {row['store_id']} ({row['city']})",
                         "price_date":    today,
                         "current_price": curr_p,
-                        "regular_price": anch_p if anch_p is not None else curr_p,
-                        "sale_price":    spec_p,
+                        "regular_price": clean_float(row['anchor_price']) if pd.notna(row['anchor_price']) else curr_p,
+                        "sale_price":    clean_float(row['special_price']),
                         "is_on_sale":    pd.notna(row['special_price'])
                     })
                 
                 bulk_upsert("store_prices", price_records)
+                
+                # --- CRITICAL: CLEAR MEMORY AFTER EACH STORE ---
+                del merged, price_records
+                gc.collect() 
 
             progress_status = {"msg": "✅ Sync Complete!", "percent": 100}
 
@@ -111,7 +122,8 @@ def process_master_zip(zip_path):
         progress_status = {"msg": f"❌ Error: {str(e)}", "percent": 0}
     finally:
         if os.path.exists(zip_path): os.remove(zip_path)
-
+        gc.collect()
+        
 # 3. ROUTES
 HTML_PAGE = """
 <!DOCTYPE html><html><head><title>Katalog Ingest</title>
