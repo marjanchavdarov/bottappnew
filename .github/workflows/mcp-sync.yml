@@ -26,18 +26,18 @@ jobs:
     - name: Test MCP connection
       run: |
         python -c "
-import requests
-import json
-print('Testing MCP connection...')
-r = requests.post('https://api.cijene.dev/mcp', json={'jsonrpc':'2.0','method':'tools/list','id':1}, timeout=10)
-print(f'Status: {r.status_code}')
-if r.status_code == 200:
-    data = r.json()
-    tools = data.get('result', {}).get('tools', [])
-    print(f'✅ Found {len(tools)} tools')
-else:
-    print('❌ Failed')
-"
+        import requests
+        import json
+        print('Testing MCP connection...')
+        r = requests.post('https://api.cijene.dev/mcp', json={'jsonrpc':'2.0','method':'tools/list','id':1}, timeout=10)
+        print(f'Status: {r.status_code}')
+        if r.status_code == 200:
+            data = r.json()
+            tools = data.get('result', {}).get('tools', [])
+            print(f'✅ Found {len(tools)} tools')
+        else:
+            print('❌ Failed')
+        "
     
     - name: Run MCP sync
       env:
