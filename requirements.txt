@@ -7,3 +7,4 @@ lxml
 gunicorn
 supabase
 math
+gc
