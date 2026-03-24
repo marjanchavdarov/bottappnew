@@ -69,49 +69,48 @@ def process_master_zip(zip_path):
 
             for i, store in enumerate(store_folders):
                 progress_status = {
-                    "msg": f"Ingesting {store.upper()} ({i+1}/{total_stores})",
+                    "msg": f"Step 1/2: Syncing {store.upper()} Products...",
                     "percent": int((i / total_stores) * 100)
                 }
 
                 req = {'p': f"{store}/products.csv", 'r': f"{store}/prices.csv", 's': f"{store}/stores.csv"}
                 if not all(f in all_files for f in req.values()): continue
 
-                # 1. Load and Sync Products (The "Master" table)
+                # --- PHASE 1: THE MASTER (PRODUCTS) ---
+                # We load products first. This is the "Parent".
                 df_p = pd.read_csv(z.open(req['p']), dtype={'barcode': str})
-                p_cols = ['barcode', 'name', 'brand', 'category', 'unit', 'quantity']
-                existing_p = [c for c in p_cols if c in df_p.columns]
-                
-                # Clean barcodes to remove .0 and whitespace
                 df_p['barcode'] = df_p['barcode'].astype(str).apply(lambda x: x.split('.')[0].strip())
                 
+                p_cols = ['barcode', 'name', 'brand', 'category', 'unit', 'quantity']
+                existing_p = [c for c in p_cols if c in df_p.columns]
                 master_data = df_p[existing_p].dropna(subset=['barcode']).drop_duplicates('barcode').to_dict('records')
-                bulk_upsert("master_products", master_data)
+                
+                # We WAIT here. bulk_upsert now returns True only when Supabase confirms receipt.
+                product_success = bulk_upsert("master_products", master_data)
                 del master_data
 
-                # --- CRITICAL PAUSE ---
-                # This gives Supabase time to index the barcodes before we send prices
-                time.sleep(2) 
+                if not product_success:
+                    print(f"⚠️ Skipping prices for {store} because products failed.")
+                    continue
 
-                # 2. Load Prices and Stores
+                # --- PHASE 2: THE CHILD (PRICES) ---
+                # We only reach this line if Phase 1 is done.
+                progress_status["msg"] = f"Step 2/2: Syncing {store.upper()} Prices..."
+                
                 df_r = pd.read_csv(z.open(req['r']))
                 df_s = pd.read_csv(z.open(req['s']))
 
-                # 3. Merge Data
                 merged = df_r.merge(df_p[['product_id', 'barcode']], on='product_id')
                 merged = merged.merge(df_s[['store_id', 'city']], on='store_id')
                 
-                # Free memory from raw dataframes
                 del df_p, df_r, df_s
                 gc.collect()
 
                 price_records = []
                 for _, row in merged.iterrows():
                     curr_p = clean_float(row['price'])
-                    # Ensure price barcode matches the cleaned product barcode
-                    clean_bc = str(row['barcode']).split('.')[0].strip()
-                    
                     price_records.append({
-                        "barcode":       clean_bc,
+                        "barcode":       str(row['barcode']).split('.')[0].strip(),
                         "store":         f"{store.capitalize()} - {row['store_id']} ({row['city']})",
                         "price_date":    today,
                         "current_price": curr_p,
@@ -120,14 +119,13 @@ def process_master_zip(zip_path):
                         "is_on_sale":    pd.notna(row['special_price'])
                     })
                 
-                # 4. Upload Prices (The "Timeline" table)
+                # Now we send the prices.
                 bulk_upsert("store_prices", price_records)
                 
-                # Clean up memory after each store folder
                 del merged, price_records
                 gc.collect()
 
-            progress_status = {"msg": "✅ Sync Complete!", "percent": 100}
+            progress_status = {"msg": "✅ All stores synced in order!", "percent": 100}
 
     except Exception as e:
         progress_status = {"msg": f"❌ Error: {str(e)}", "percent": 0}
